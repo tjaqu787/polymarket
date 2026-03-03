@@ -1,6 +1,3 @@
-.headers on
-.mode column
-
 -- First pass: deadline-ish markets
 SELECT COUNT(*) AS n_deadline_like
 FROM markets
