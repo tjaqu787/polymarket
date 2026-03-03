@@ -1,23 +1,5 @@
--- First pass: deadline-ish markets
-SELECT COUNT(*) AS n_deadline_like
-FROM markets
-WHERE lower(question) LIKE '% by %'
-   OR lower(question) LIKE '% before %'
-   OR lower(question) LIKE '% no later than %'
-   OR lower(question) LIKE '% until %';
-
--- Exclude sports phrasing like "win by more than"
-SELECT COUNT(*) AS n_deadline_like_cleaned
-FROM n_deadline_like
-WHERE (lower(question) LIKE '% by %'
-    OR lower(question) LIKE '% before %'
-    OR lower(question) LIKE '% no later than %'
-    OR lower(question) LIKE '% until %')
-  AND lower(question) NOT LIKE '% by more than %'
-  AND lower(question) NOT LIKE '% by at least %';
-
-
-SELECT * AS q
+CREATE VIEW bets_for_timing AS
+SELECT *
 FROM markets
 WHERE (lower(question) LIKE '% by %'
     OR lower(question) LIKE '% before %'
