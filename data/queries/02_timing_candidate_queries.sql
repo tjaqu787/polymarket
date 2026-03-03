@@ -8,7 +8,7 @@ WHERE lower(question) LIKE '% by %'
 
 -- Exclude sports phrasing like "win by more than"
 SELECT COUNT(*) AS n_deadline_like_cleaned
-FROM markets
+FROM n_deadline_like
 WHERE (lower(question) LIKE '% by %'
     OR lower(question) LIKE '% before %'
     OR lower(question) LIKE '% no later than %'
@@ -17,12 +17,27 @@ WHERE (lower(question) LIKE '% by %'
   AND lower(question) NOT LIKE '% by at least %';
 
 -- Show examples
-SELECT market_id, end_date, substr(question,1,140) AS q
-FROM markets
 WHERE (lower(question) LIKE '% by %'
     OR lower(question) LIKE '% before %'
     OR lower(question) LIKE '% no later than %'
     OR lower(question) LIKE '% until %')
   AND lower(question) NOT LIKE '% by more than %'
+  AND lower(question) NOT LIKE '%nba%'
+  AND lower(question) NOT LIKE '%nfl%'
+  AND lower(question) NOT LIKE '%mlb%'
+  AND lower(question) NOT LIKE '%all-time high%'
+  AND lower(question) NOT LIKE '%points%'
   AND lower(question) NOT LIKE '% by at least %'
-LIMIT 30;
+  AND lower(question) NOT LIKE '%eth%'
+  AND lower(question) NOT LIKE '%$%'
+  AND lower(question) NOT LIKE '%covid%'
+  AND lower(question) NOT LIKE '%tweet %'
+  AND lower(question) NOT LIKE '%market cap%'
+  AND lower(question) NOT LIKE '%mcap%'
+  AND lower(question) NOT LIKE '%usd%'
+  AND lower(question) NOT LIKE '%candidate win%'
+  AND lower(question) NOT LIKE '% win %'
+  AND lower(question) NOT LIKE '%rcp%'
+  AND lower(question) NOT LIKE '% case %'
+  AND lower(question) NOT LIKE '% cases %'
+;
