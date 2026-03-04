@@ -1,4 +1,4 @@
-CREATE VIEW bets_for_timing AS
+CREATE VIEW bets_for_timing_view AS
 SELECT *
 FROM markets
 WHERE (lower(question) LIKE '% by %'
