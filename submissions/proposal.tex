@@ -1,0 +1,59 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+
+\title{STAT 519/619 Project Proposal: Bayesian Analysis of Temporal Bias in Prediction Markets}
+\author{Your Name}
+\date{March 14, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Dataset and Motivation}
+
+We will analyze betting data from Polymarket, a decentralized prediction market platform where users bet on real-world events. Our dataset includes historical price data, bet volumes, and resolution dates for events with varying time horizons. Prediction markets aggregate collective beliefs, but behavioral economics suggests that humans exhibit \textit{hyperbolic discounting}---systematically misestimating the likelihood and timing of distant future events compared to near-term events.
+
+This dataset is ideal for Bayesian analysis because: (1) it contains rich temporal structure with events at different time horizons, (2) market prices reflect aggregate probabilistic beliefs that can be modeled as posterior distributions, and (3) uncertainty quantification is essential for understanding both market dynamics and individual betting behavior.
+
+\section{Research Question}
+
+\textbf{Do Polymarket participants exhibit temporal bias in their probability assessments, and can we use Bayesian modeling to quantify the systematic distortions in beliefs about events at different time horizons?}
+
+Specifically, we aim to: (1) identify whether betting patterns show evidence of hyperbolic discounting, (2) model the arrival rate of events using temporal structure, and (3) assess betting decision quality under uncertainty.
+
+\section{Proposed Bayesian Modeling Approach}
+
+\subsection{Model Specification}
+
+We propose modeling event arrivals as a Poisson process with rate parameter $\lambda$ that varies by time horizon:
+\begin{equation}
+X_t \sim \text{Poisson}(\lambda_t), \quad \lambda_t = \lambda_0 \exp(\beta \cdot t)
+\end{equation}
+where $t$ represents the time until event resolution. The exponential dependence on $t$ captures potential temporal bias, with $\beta \neq 0$ indicating systematic distortion in beliefs about distant events.
+
+\textbf{Prior specifications:}
+\begin{itemize}
+    \item $\lambda_0 \sim \text{Gamma}(a_0, b_0)$ with hyperpriors $a_0, b_0$ chosen via empirical Bayes
+    \item $\beta \sim \text{Normal}(0, \sigma^2_\beta)$ to capture temporal bias
+    \item Hierarchical structure for different event categories (politics, sports, etc.)
+\end{itemize}
+
+We will also implement a Bayesian logistic regression model to predict betting certainty based on time horizon, market liquidity, and historical volatility.
+
+
+\section{Analysis Plan}
+
+\begin{enumerate}
+    \item \textbf{Posterior inference:} Estimate temporal bias parameter $\beta$ and quantify uncertainty
+    \item \textbf{Model checking:} Prior/posterior predictive checks, sensitivity analysis on prior specifications, convergence diagnostics (Rhat, effective sample size)
+    \item \textbf{Betting strategy evaluation:} Identify markets where our posterior beliefs diverge significantly from market prices, classify bets by certainty levels
+    \item \textbf{(Optional extension):} Develop Bayesian Kelly criterion for optimal portfolio allocation incorporating posterior uncertainty
+\end{enumerate}
+
+\section{Expected Outcomes}
+
+We expect to find evidence of temporal bias in prediction markets and quantify its magnitude through Bayesian parameter estimation. The analysis will demonstrate practical applications of Bayesian methods to financial decision-making under uncertainty, with model comparison providing insights into sampling efficiency trade-offs.
+
+\end{document}
