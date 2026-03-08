@@ -2,9 +2,8 @@ PRAGMA foreign_keys = ON;
 
 BEGIN TRANSACTION;
 
-DROP TABLE IF EXISTS markets;
-
-CREATE TABLE markets (
+-- Create table if it doesn't exist (for incremental mode)
+CREATE TABLE IF NOT EXISTS markets (
   market_id TEXT PRIMARY KEY,
   event_id TEXT NOT NULL,
 
@@ -31,7 +30,8 @@ CREATE TABLE markets (
   FOREIGN KEY(event_id) REFERENCES events(id)
 );
 
-INSERT INTO markets (
+-- Use INSERT OR REPLACE for incremental updates
+INSERT OR REPLACE INTO markets (
   market_id, event_id,
   question, market_slug,
   created_at, updated_at, end_date, closed_time,

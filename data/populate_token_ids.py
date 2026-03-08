@@ -12,6 +12,7 @@ DB_PATH = "polymarket.db"
 GAMMA_API_URL = "https://gamma-api.polymarket.com/markets"
 RATE_LIMIT = 0.2  # seconds between requests
 TEST_MODE = False  # Set to True to test with just 5 markets
+INCREMENTAL_MODE = True  # Set to False to reprocess all markets
 
 
 def create_tokens_table(conn: sqlite3.Connection):
@@ -32,16 +33,33 @@ def create_tokens_table(conn: sqlite3.Connection):
 
 
 def get_markets(conn: sqlite3.Connection):
-    """Get all market IDs from the view."""
+    """Get market IDs from the view. In incremental mode, only get markets without tokens."""
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-    cur.execute("""
-        SELECT DISTINCT market_id
-        FROM bets_for_timing_view
-        WHERE market_id IS NOT NULL
-        ORDER BY created_at DESC
-    """)
-    return [row["market_id"] for row in cur.fetchall()]
+
+    if INCREMENTAL_MODE:
+        # Only get markets that don't have tokens yet
+        cur.execute("""
+            SELECT DISTINCT market_id
+            FROM bets_for_timing_view
+            WHERE market_id IS NOT NULL
+              AND market_id NOT IN (SELECT DISTINCT market_id FROM market_tokens)
+            ORDER BY created_at DESC
+        """)
+        mode = "INCREMENTAL - only new markets"
+    else:
+        # Get all markets
+        cur.execute("""
+            SELECT DISTINCT market_id
+            FROM bets_for_timing_view
+            WHERE market_id IS NOT NULL
+            ORDER BY created_at DESC
+        """)
+        mode = "BULK - all markets"
+
+    markets = [row["market_id"] for row in cur.fetchall()]
+    print(f"[mode] {mode}")
+    return markets
 
 
 def fetch_token_ids(market_id: str) -> list[str]:
