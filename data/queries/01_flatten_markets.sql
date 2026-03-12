@@ -76,11 +76,8 @@ WHERE e.markets IS NOT NULL
 CREATE INDEX IF NOT EXISTS idx_markets_event_id ON markets(event_id);
 CREATE INDEX IF NOT EXISTS idx_markets_end_date ON markets(end_date);
 
--- Sanity checks (run these before COMMIT)
--- SELECT COUNT(*) AS n_markets FROM markets;
+-- Sanity check
+SELECT COUNT(*) AS n_markets FROM markets;
 
--- If happy:
--- COMMIT;
-
--- If something looks wrong:
--- ROLLBACK;
+-- Commit the transaction
+COMMIT;
