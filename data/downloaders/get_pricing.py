@@ -10,13 +10,13 @@ import os
 from datetime import datetime
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DB_PATH          = "polymarket.db"
+DB_PATH          = "../polymarket.db"  # Database is in data/ directory
 GAMMA_API_URL    = "https://gamma-api.polymarket.com/markets"
 CLOB_URL         = "https://clob.polymarket.com/prices-history"
 INTERVAL         = "1d"       # daily aggregation
 FIDELITY         = 1440       # 1440 min = 1 day, matches daily interval
 RATE_LIMIT       = 0.15       # seconds between requests (4 req/s is safe)
-TEST_MODE        = True       # Set to True to test with just 2 markets
+TEST_MODE        = False      # Set to True to test with just 2 markets
 INCREMENTAL_MODE = True       # Set to False to fetch all, True to skip recently updated tokens
 SKIP_THRESHOLD   = 86400      # Skip tokens updated within this many seconds (86400 = 24 hours)
 # ─────────────────────────────────────────────────────────────────────────────

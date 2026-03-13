@@ -6,7 +6,7 @@ from datetime import datetime
 # Config
 INCREMENTAL_MODE = True  # Set to False for bulk download of all events
 
-conn = sqlite3.connect("polymarket.db")
+conn = sqlite3.connect("../polymarket.db")
 cur = conn.cursor()
 cur.execute("""
     CREATE TABLE IF NOT EXISTS events (

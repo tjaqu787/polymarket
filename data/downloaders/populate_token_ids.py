@@ -8,7 +8,7 @@ import time
 import json
 
 # Config
-DB_PATH = "polymarket.db"
+DB_PATH = "../polymarket.db"
 GAMMA_API_URL = "https://gamma-api.polymarket.com/markets"
 RATE_LIMIT = 0.2  # seconds between requests
 TEST_MODE = False  # Set to True to test with just 5 markets
