@@ -1,5 +1,6 @@
 """
 Fetch clobTokenIds from Polymarket Gamma API and store them in the database.
+This is depricated. I noticed we have this data in the markkets view after adding some of the json fields 
 """
 
 import sqlite3
@@ -7,11 +8,12 @@ import requests
 import time
 import json
 
+print("you're using populate_token_ids.py this has been depricated ")
 # Config
 DB_PATH = "../polymarket.db"
 GAMMA_API_URL = "https://gamma-api.polymarket.com/markets"
 RATE_LIMIT = 0.2  # seconds between requests
-TEST_MODE = False  # Set to True to test with just 5 markets
+TEST_MODE = True  # Set to True to test with just 5 markets
 INCREMENTAL_MODE = True  # Set to False to reprocess all markets
 
 
