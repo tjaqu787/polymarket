@@ -1,5 +1,13 @@
 CREATE VIEW bets_for_timing_view AS
-SELECT filtered_markets.*, mt.token_id, mt.outcome, mt.token_index
+SELECT
+  filtered_markets.*,
+  mt.token_id,
+  mt.outcome,
+  mt.token_index,
+  e.slug AS event_slug,
+  e.title AS event_title,
+  filtered_markets.event_id AS market_group,
+  SUBSTR(filtered_markets.end_date, 1, 10) AS resolution_date
 FROM (
   SELECT *
   FROM markets
@@ -28,4 +36,5 @@ FROM (
     AND lower(question) NOT LIKE '% cases %'
 ) filtered_markets
 INNER JOIN market_tokens mt ON filtered_markets.market_id = mt.market_id
+INNER JOIN events e ON filtered_markets.event_id = e.id
 ;
