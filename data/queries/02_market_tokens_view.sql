@@ -2,22 +2,9 @@
 DROP VIEW IF EXISTS market_tokens;
 DROP TABLE IF EXISTS market_tokens;
 
-BEGIN TRANSACTION;
-
--- Create market_tokens as a TABLE (materialized for performance)
--- This is populated from markets view, which derives from events
--- Run this script to refresh the table when events data is updated
-CREATE TABLE market_tokens (
-    market_id   TEXT    NOT NULL,
-    token_id    TEXT    NOT NULL,
-    outcome     TEXT    NOT NULL,
-    token_index INTEGER NOT NULL,
-    is_active   INTEGER NOT NULL DEFAULT 1,  -- Active flag for filtering in get_pricing
-    PRIMARY KEY (market_id, token_index)
-);
-
--- Populate market_tokens from markets view
-INSERT INTO market_tokens (market_id, token_id, outcome, token_index, is_active)
+-- Create market_tokens as a VIEW referencing markets
+-- This view automatically reflects changes in the markets table
+CREATE VIEW market_tokens AS
 WITH
   token_ids AS (
     SELECT
@@ -60,17 +47,3 @@ INNER JOIN outcomes o
   AND t.token_index = o.outcome_index
 INNER JOIN markets m
   ON t.market_id = m.market_id;
-
--- Create indexes for fast lookups
-CREATE INDEX IF NOT EXISTS idx_token_id ON market_tokens(token_id);
-CREATE INDEX IF NOT EXISTS idx_market_id ON market_tokens(market_id);
-CREATE INDEX IF NOT EXISTS idx_is_active ON market_tokens(is_active);
-
-COMMIT;
-
--- Show summary statistics
-SELECT 'Total tokens:' AS metric, COUNT(*) AS count FROM market_tokens
-UNION ALL
-SELECT 'Active tokens:' AS metric, COUNT(*) AS count FROM market_tokens WHERE is_active = 1
-UNION ALL
-SELECT 'Inactive tokens:' AS metric, COUNT(*) AS count FROM market_tokens WHERE is_active = 0;

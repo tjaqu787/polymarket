@@ -2,12 +2,15 @@ import requests
 import sqlite3
 import json
 from datetime import datetime
+import os
 
 # Config
 INCREMENTAL_MODE = True  # Set to False for bulk download of all events
 
 conn = sqlite3.connect("../polymarket.db")
 cur = conn.cursor()
+
+# Create events table
 cur.execute("""
     CREATE TABLE IF NOT EXISTS events (
         id TEXT PRIMARY KEY,
@@ -22,6 +25,83 @@ cur.execute("""
         markets TEXT
     )
 """)
+
+# Check if markets table exists
+cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='markets'")
+markets_exists = cur.fetchone() is not None
+
+# If markets table doesn't exist, create it using SQL query file
+if not markets_exists:
+    print("[setup] markets table doesn't exist, creating from SQL file...")
+    sql_file = "../queries/01_flatten_markets.sql"
+    if os.path.exists(sql_file):
+        with open(sql_file, 'r') as f:
+            sql_script = f.read()
+        cur.executescript(sql_script)
+        print("[setup] markets table created successfully")
+    else:
+        print(f"[error] SQL file not found: {sql_file}")
+
+# Check if market_tokens view exists
+cur.execute("SELECT name FROM sqlite_master WHERE type='view' AND name='market_tokens'")
+market_tokens_exists = cur.fetchone() is not None
+
+# If market_tokens view doesn't exist, create it using SQL query file
+if not market_tokens_exists:
+    print("[setup] market_tokens view doesn't exist, creating from SQL file...")
+    sql_file = "../queries/02_market_tokens_view.sql"
+    if os.path.exists(sql_file):
+        with open(sql_file, 'r') as f:
+            sql_script = f.read()
+        cur.executescript(sql_script)
+        print("[setup] market_tokens view created successfully")
+    else:
+        print(f"[error] SQL file not found: {sql_file}")
+
+# Drop and recreate bets_for_timing_view (depends on markets and market_tokens)
+cur.execute("DROP VIEW IF EXISTS bets_for_timing_view")
+cur.execute("""
+    CREATE VIEW IF NOT EXISTS bets_for_timing_view AS
+    SELECT
+      filtered_markets.*,
+      mt.token_id,
+      mt.outcome,
+      mt.token_index,
+      e.slug AS event_slug,
+      e.title AS event_title,
+      filtered_markets.event_id AS market_group,
+      SUBSTR(filtered_markets.end_date, 1, 10) AS resolution_date
+    FROM (
+      SELECT *
+      FROM markets
+      WHERE (lower(question) LIKE '% by %'
+          OR lower(question) LIKE '% before %'
+          OR lower(question) LIKE '% no later than %'
+          OR lower(question) LIKE '% until %')
+        AND lower(question) NOT LIKE '% by more than %'
+        AND lower(question) NOT LIKE '%nba%'
+        AND lower(question) NOT LIKE '%nfl%'
+        AND lower(question) NOT LIKE '%mlb%'
+        AND lower(question) NOT LIKE '%all-time high%'
+        AND lower(question) NOT LIKE '%points%'
+        AND lower(question) NOT LIKE '% by at least %'
+        AND lower(question) NOT LIKE '%eth%'
+        AND lower(question) NOT LIKE '%$%'
+        AND lower(question) NOT LIKE '%covid%'
+        AND lower(question) NOT LIKE '%tweet %'
+        AND lower(question) NOT LIKE '%market cap%'
+        AND lower(question) NOT LIKE '%mcap%'
+        AND lower(question) NOT LIKE '%usd%'
+        AND lower(question) NOT LIKE '%candidate win%'
+        AND lower(question) NOT LIKE '% win %'
+        AND lower(question) NOT LIKE '%rcp%'
+        AND lower(question) NOT LIKE '% case %'
+        AND lower(question) NOT LIKE '% cases %'
+    ) filtered_markets
+    INNER JOIN market_tokens mt ON filtered_markets.market_id = mt.market_id
+    INNER JOIN events e ON filtered_markets.event_id = e.id
+""")
+
 conn.commit()
 
 def get_last_end_date():
@@ -33,11 +113,128 @@ def get_last_end_date():
         return result
     return None
 
+
+def flatten_and_insert_markets(event_id, markets_list):
+    """
+    Flatten markets from event JSON and insert into markets table.
+    market_tokens view will automatically reflect the changes.
+    """
+    if not markets_list:
+        return 0
+
+    markets_inserted = 0
+
+    for market in markets_list:
+        # Extract all market fields
+        market_id = market.get("id")
+        if not market_id:
+            continue
+
+        # Prepare market data tuple (must match table column order)
+        market_data = (
+            market_id,
+            event_id,
+            market.get("question"),
+            market.get("slug"),
+            market.get("description"),
+            market.get("category"),
+            market.get("marketType"),
+            market.get("createdAt"),
+            market.get("updatedAt"),
+            market.get("startDate"),
+            market.get("endDate"),
+            market.get("closedTime"),
+            market.get("endDateIso"),
+            market.get("startDateIso"),
+            market.get("active"),
+            market.get("closed"),
+            market.get("archived"),
+            market.get("restricted"),
+            market.get("wideFormat"),
+            market.get("new"),
+            market.get("sentDiscord"),
+            market.get("featured"),
+            market.get("approved"),
+            market.get("ready"),
+            market.get("funded"),
+            market.get("cyom"),
+            market.get("fpmmLive"),
+            market.get("clearBookOnStart"),
+            market.get("manualActivation"),
+            market.get("negRiskOther"),
+            market.get("pendingDeployment"),
+            market.get("deploying"),
+            market.get("hasReviewedDates"),
+            market.get("readyForCron"),
+            market.get("volumeNum"),
+            market.get("liquidityNum"),
+            market.get("volume"),
+            market.get("liquidity"),
+            market.get("bestBid"),
+            market.get("bestAsk"),
+            market.get("spread"),
+            market.get("lastTradePrice"),
+            market.get("volume24hr"),
+            market.get("volume1wk"),
+            market.get("volume1mo"),
+            market.get("volume1yr"),
+            market.get("volume1wkAmm"),
+            market.get("volume1moAmm"),
+            market.get("volume1yrAmm"),
+            market.get("volume1wkClob"),
+            market.get("volume1moClob"),
+            market.get("volume1yrClob"),
+            market.get("oneDayPriceChange"),
+            market.get("oneHourPriceChange"),
+            market.get("oneWeekPriceChange"),
+            market.get("oneMonthPriceChange"),
+            market.get("oneYearPriceChange"),
+            json.dumps(market.get("outcomes")) if market.get("outcomes") else None,
+            json.dumps(market.get("outcomePrices")) if market.get("outcomePrices") else None,
+            market.get("umaResolutionStatus"),
+            json.dumps(market.get("umaResolutionStatuses")) if market.get("umaResolutionStatuses") else None,
+            market.get("resolutionSource"),
+            market.get("resolvedBy"),
+            market.get("conditionId"),
+            market.get("marketMakerAddress"),
+            json.dumps(market.get("clobTokenIds")) if market.get("clobTokenIds") else None,
+            market.get("fee"),
+            market.get("rewardsMinSize"),
+            market.get("rewardsMaxSpread"),
+            market.get("competitive"),
+            market.get("pagerDutyNotificationEnabled"),
+            market.get("rfqEnabled"),
+            market.get("holdingRewardsEnabled"),
+            market.get("feesEnabled"),
+            market.get("requiresTranslation"),
+            market.get("image"),
+            market.get("icon"),
+            market.get("twitterCardLocation"),
+            market.get("twitterCardLastRefreshed"),
+            market.get("submitted_by"),
+            market.get("creator"),
+            market.get("updatedBy"),
+            market.get("feeType"),
+        )
+
+        # Insert market
+        cur.execute("""
+            INSERT OR REPLACE INTO markets VALUES (
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?,?,?,?,?,?
+            )
+        """, market_data)
+        markets_inserted += 1
+
+    return markets_inserted
+
 def fetch_all_events():
     url = "https://gamma-api.polymarket.com/events"
     offset = 0
     limit = 500
-    total = 0
+    total_events = 0
+    total_markets = 0
 
     # Get the last end_date for incremental mode
     params = {"limit": limit, "offset": offset}
@@ -54,16 +251,20 @@ def fetch_all_events():
     while True:
         params["offset"] = offset
         r = requests.get(url, params=params).json()
-        
+
         if not r:
             break
-        
+
         for e in r:
+            event_id = e.get("id")
+            markets_list = e.get("markets", [])
+
+            # Insert event with markets JSON (kept for backup/reference)
             cur.execute("""
-                INSERT OR REPLACE INTO events 
+                INSERT OR REPLACE INTO events
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                e.get("id"),
+                event_id,
                 e.get("title"),
                 e.get("slug"),
                 e.get("seriesSlug"),
@@ -72,21 +273,29 @@ def fetch_all_events():
                 e.get("closed"),
                 e.get("liquidity"),
                 e.get("volume"),
-                json.dumps(e.get("markets", []))
+                json.dumps(markets_list)
             ))
-            total += 1
-        
+            total_events += 1
+
+            # Flatten and insert markets (market_tokens view auto-updates)
+            if markets_list:
+                num_markets = flatten_and_insert_markets(event_id, markets_list)
+                total_markets += num_markets
+
         conn.commit()
         offset += limit
-        print(f"Processed {offset} events, total inserted/updated: {total}...")
+        print(f"Processed {offset} events | Events: {total_events} | Markets: {total_markets}")
 
         if len(r) < limit:
             break
 
     print(f"\n{'─'*50}")
-    print(f"Done. Total events inserted/updated: {total}")
-    print(f"      Database: polymarket.db")
-    return total
+    print(f"Done!")
+    print(f"  Events inserted/updated:  {total_events}")
+    print(f"  Markets inserted/updated: {total_markets}")
+    print(f"  Tokens auto-populated via market_tokens view")
+    print(f"  Database: polymarket.db")
+    return total_events, total_markets
 
 if __name__ == "__main__":
     fetch_all_events()
