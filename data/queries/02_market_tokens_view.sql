@@ -1,18 +1,23 @@
--- Show count before changes
-SELECT 'Market tokens count BEFORE:' AS status, COUNT(*) AS n_tokens
-FROM market_tokens
-WHERE EXISTS (SELECT 1 FROM sqlite_master WHERE name='market_tokens')
-UNION ALL
-SELECT 'Market tokens count BEFORE:' AS status, 0 AS n_tokens
-WHERE NOT EXISTS (SELECT 1 FROM sqlite_master WHERE name='market_tokens');
-
--- Drop existing table/view if it exists
-DROP TABLE IF EXISTS market_tokens;
+-- Drop existing view/table if it exists
 DROP VIEW IF EXISTS market_tokens;
+DROP TABLE IF EXISTS market_tokens;
 
--- Create market_tokens as a VIEW that derives from markets.clob_token_ids
--- This will automatically update when markets (which derives from events) is updated
-CREATE VIEW market_tokens AS
+BEGIN TRANSACTION;
+
+-- Create market_tokens as a TABLE (materialized for performance)
+-- This is populated from markets view, which derives from events
+-- Run this script to refresh the table when events data is updated
+CREATE TABLE market_tokens (
+    market_id   TEXT    NOT NULL,
+    token_id    TEXT    NOT NULL,
+    outcome     TEXT    NOT NULL,
+    token_index INTEGER NOT NULL,
+    is_active   INTEGER NOT NULL DEFAULT 1,  -- Active flag for filtering in get_pricing
+    PRIMARY KEY (market_id, token_index)
+);
+
+-- Populate market_tokens from markets view
+INSERT INTO market_tokens (market_id, token_id, outcome, token_index, is_active)
 WITH
   token_ids AS (
     SELECT
@@ -56,13 +61,16 @@ INNER JOIN outcomes o
 INNER JOIN markets m
   ON t.market_id = m.market_id;
 
--- Note: Can't directly index a view in SQLite
--- The underlying events table is already indexed for better performance
+-- Create indexes for fast lookups
+CREATE INDEX IF NOT EXISTS idx_token_id ON market_tokens(token_id);
+CREATE INDEX IF NOT EXISTS idx_market_id ON market_tokens(market_id);
+CREATE INDEX IF NOT EXISTS idx_is_active ON market_tokens(is_active);
 
--- Show count after changes
-SELECT 'Market tokens count AFTER:' AS status, COUNT(*) AS n_tokens FROM market_tokens;
+COMMIT;
 
--- Show active vs inactive counts
-SELECT 'Active tokens:' AS status, COUNT(*) AS n_tokens FROM market_tokens WHERE is_active = 1
+-- Show summary statistics
+SELECT 'Total tokens:' AS metric, COUNT(*) AS count FROM market_tokens
 UNION ALL
-SELECT 'Inactive tokens:' AS status, COUNT(*) AS n_tokens FROM market_tokens WHERE is_active = 0;
+SELECT 'Active tokens:' AS metric, COUNT(*) AS count FROM market_tokens WHERE is_active = 1
+UNION ALL
+SELECT 'Inactive tokens:' AS metric, COUNT(*) AS count FROM market_tokens WHERE is_active = 0;
