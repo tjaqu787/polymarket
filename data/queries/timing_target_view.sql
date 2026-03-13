@@ -1,3 +1,8 @@
+
+-- Drop existing view if it exists
+DROP VIEW IF EXISTS bets_for_timing_view;
+
+-- Create the timing view (depends on markets view)
 CREATE VIEW bets_for_timing_view AS
 SELECT
   filtered_markets.*,

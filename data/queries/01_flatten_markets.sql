@@ -1,145 +1,21 @@
 PRAGMA foreign_keys = ON;
 
+-- Show count before changes
+SELECT 'Markets count BEFORE:' AS status, COUNT(*) AS n_markets FROM markets WHERE EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='markets')
+UNION ALL
+SELECT 'Markets count BEFORE:' AS status, COUNT(*) AS n_markets FROM markets WHERE EXISTS (SELECT 1 FROM sqlite_master WHERE type='view' AND name='markets')
+UNION ALL
+SELECT 'Markets count BEFORE:' AS status, 0 AS n_markets WHERE NOT EXISTS (SELECT 1 FROM sqlite_master WHERE name='markets');
+
 BEGIN TRANSACTION;
 
--- Create comprehensive markets table with all available fields
-CREATE TABLE IF NOT EXISTS markets (
-  market_id TEXT PRIMARY KEY,
-  event_id TEXT NOT NULL,
+-- Drop the old table if it exists (converting to view)
+DROP TABLE IF EXISTS markets;
+DROP VIEW IF EXISTS markets;
 
-  -- Basic info
-  question TEXT,
-  market_slug TEXT,
-  description TEXT,
-  category TEXT,
-  market_type TEXT,
-
-  -- Dates
-  created_at TEXT,
-  updated_at TEXT,
-  start_date TEXT,
-  end_date TEXT,
-  closed_time TEXT,
-  end_date_iso TEXT,
-  start_date_iso TEXT,
-
-  -- Status flags
-  active INTEGER,
-  closed INTEGER,
-  archived INTEGER,
-  restricted INTEGER,
-  wide_format INTEGER,
-  new INTEGER,
-  sent_discord INTEGER,
-  featured INTEGER,
-  approved INTEGER,
-  ready INTEGER,
-  funded INTEGER,
-  cyom INTEGER,
-  fpmm_live INTEGER,
-  clear_book_on_start INTEGER,
-  manual_activation INTEGER,
-  neg_risk_other INTEGER,
-  pending_deployment INTEGER,
-  deploying INTEGER,
-  has_reviewed_dates INTEGER,
-  ready_for_cron INTEGER,
-
-  -- Financial data
-  volume_num REAL,
-  liquidity_num REAL,
-  volume REAL,
-  liquidity REAL,
-  best_bid REAL,
-  best_ask REAL,
-  spread REAL,
-  last_trade_price REAL,
-
-  -- Volume metrics
-  volume_24hr REAL,
-  volume_1wk REAL,
-  volume_1mo REAL,
-  volume_1yr REAL,
-  volume_1wk_amm REAL,
-  volume_1mo_amm REAL,
-  volume_1yr_amm REAL,
-  volume_1wk_clob REAL,
-  volume_1mo_clob REAL,
-  volume_1yr_clob REAL,
-
-  -- Price changes
-  one_day_price_change REAL,
-  one_hour_price_change REAL,
-  one_week_price_change REAL,
-  one_month_price_change REAL,
-  one_year_price_change REAL,
-
-  -- Outcomes
-  outcomes_json TEXT,
-  outcome_prices_json TEXT,
-
-  -- Resolution
-  uma_resolution_status TEXT,
-  uma_resolution_statuses TEXT,
-  resolution_source TEXT,
-  resolved_by TEXT,
-
-  -- Technical IDs
-  condition_id TEXT,
-  market_maker_address TEXT,
-  clob_token_ids TEXT,
-
-  -- Fees and rewards
-  fee TEXT,
-  rewards_min_size REAL,
-  rewards_max_spread REAL,
-  competitive REAL,
-
-  -- Feature flags
-  pager_duty_notification_enabled INTEGER,
-  rfq_enabled INTEGER,
-  holding_rewards_enabled INTEGER,
-  fees_enabled INTEGER,
-  requires_translation INTEGER,
-
-  -- Media
-  image TEXT,
-  icon TEXT,
-  twitter_card_location TEXT,
-  twitter_card_last_refreshed TEXT,
-
-  -- Misc
-  submitted_by TEXT,
-  creator TEXT,
-  updated_by INTEGER,
-  fee_type TEXT,
-
-  FOREIGN KEY(event_id) REFERENCES events(id)
-);
-
--- Insert or replace all markets with all fields
-INSERT OR REPLACE INTO markets (
-  market_id, event_id,
-  question, market_slug, description, category, market_type,
-  created_at, updated_at, start_date, end_date, closed_time, end_date_iso, start_date_iso,
-  active, closed, archived, restricted, wide_format, new, sent_discord, featured,
-  approved, ready, funded, cyom, fpmm_live, clear_book_on_start, manual_activation,
-  neg_risk_other, pending_deployment, deploying, has_reviewed_dates, ready_for_cron,
-  volume_num, liquidity_num, volume, liquidity, best_bid, best_ask, spread, last_trade_price,
-  volume_24hr, volume_1wk, volume_1mo, volume_1yr,
-  volume_1wk_amm, volume_1mo_amm, volume_1yr_amm,
-  volume_1wk_clob, volume_1mo_clob, volume_1yr_clob,
-  one_day_price_change, one_hour_price_change, one_week_price_change,
-  one_month_price_change, one_year_price_change,
-  outcomes_json, outcome_prices_json,
-  uma_resolution_status, uma_resolution_statuses, resolution_source, resolved_by,
-  condition_id, market_maker_address, clob_token_ids,
-  fee, rewards_min_size, rewards_max_spread, competitive,
-  pager_duty_notification_enabled, rfq_enabled, holding_rewards_enabled,
-  fees_enabled, requires_translation,
-  image, icon, twitter_card_location, twitter_card_last_refreshed,
-  submitted_by, creator, updated_by, fee_type
-)
+-- Create markets as a VIEW that derives from events.markets JSON
+-- This will automatically update when events are updated
+CREATE VIEW IF NOT EXISTS markets AS
 SELECT
   json_extract(m.value, '$.id')                                    AS market_id,
   e.id                                                             AS event_id,
@@ -258,16 +134,12 @@ WHERE e.markets IS NOT NULL
   AND json_valid(e.markets)
   AND json_extract(m.value, '$.id') IS NOT NULL;
 
--- Create indexes for commonly queried fields
-CREATE INDEX IF NOT EXISTS idx_markets_event_id ON markets(event_id);
-CREATE INDEX IF NOT EXISTS idx_markets_end_date ON markets(end_date);
-CREATE INDEX IF NOT EXISTS idx_markets_category ON markets(category);
-CREATE INDEX IF NOT EXISTS idx_markets_active ON markets(active);
-CREATE INDEX IF NOT EXISTS idx_markets_closed ON markets(closed);
-CREATE INDEX IF NOT EXISTS idx_markets_market_type ON markets(market_type);
-
--- Sanity check
-SELECT COUNT(*) AS n_markets FROM markets;
+-- Create indexes on the events table to improve view performance
+CREATE INDEX IF NOT EXISTS idx_events_id ON events(id);
+CREATE INDEX IF NOT EXISTS idx_events_markets ON events(markets) WHERE markets IS NOT NULL;
 
 -- Commit the transaction
 COMMIT;
+
+-- Show count after changes
+SELECT 'Markets count AFTER:' AS status, COUNT(*) AS n_markets FROM markets;
