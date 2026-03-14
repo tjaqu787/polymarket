@@ -4,18 +4,17 @@ Saves results to: data/polymarket_price_history.db (SQLite).
 """
 
 import sqlite3
-import requests
+import asyncio
+import aiohttp
 import time
-import os
 from datetime import datetime
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DB_PATH          = "../polymarket.db"  # Database is in data/ directory
-GAMMA_API_URL    = "https://gamma-api.polymarket.com/markets"
 CLOB_URL         = "https://clob.polymarket.com/prices-history"
-INTERVAL         = "1d"       # daily aggregation
-FIDELITY         = 1440       # 1440 min = 1 day, matches daily interval
-RATE_LIMIT       = 0.15       # seconds between requests (4 req/s is safe)
+INTERVAL         = "max"      # max = all available data (works for new and old markets)
+FIDELITY         = None       # Not used with interval=max
+CONCURRENT_LIMIT = 20         # Max concurrent requests (increased from 4 req/s)
 TEST_MODE        = False      # Set to True to test with just 2 markets
 INCREMENTAL_MODE = True       # Set to False to fetch all, True to skip recently updated tokens
 SKIP_THRESHOLD   = 86400      # Skip tokens updated within this many seconds (86400 = 24 hours)
@@ -79,23 +78,24 @@ def should_skip_token(conn: sqlite3.Connection, token_id: str) -> bool:
     return age < SKIP_THRESHOLD
 
 
-def fetch_price_history(token_id: str, interval: str = INTERVAL,
-                        fidelity: int = FIDELITY) -> list[dict]:
-    """Call Polymarket /prices-history for one token_id."""
+async def fetch_price_history(session: aiohttp.ClientSession, token_id: str,
+                               interval: str = INTERVAL, fidelity: int = FIDELITY) -> list[dict]:
+    """Call Polymarket /prices-history for one token_id asynchronously."""
     params = {
-        "market":   token_id,
+        "market": token_id,
         "interval": interval,
-        "fidelity": fidelity,
     }
+    if fidelity is not None:
+        params["fidelity"] = fidelity
+
     try:
-        resp = requests.get(CLOB_URL, params=params, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        history = data.get("history", [])
-        return history
-    except requests.exceptions.HTTPError as e:
-        print(f"  [warn] HTTP {resp.status_code} for token {token_id[:20]}...")
-        print(f"  [debug] Response: {resp.text}")
+        async with session.get(CLOB_URL, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+            history = data.get("history", [])
+            return history
+    except aiohttp.ClientResponseError as e:
+        print(f"  [warn] HTTP {e.status} for token {token_id[:20]}...")
         return []
     except Exception as e:
         print(f"  [error] token {token_id[:20]}...: {e}")
@@ -146,8 +146,68 @@ def save_rows(conn: sqlite3.Connection, market_id: str, event_id: str,
     return len(rows)
 
 
+async def process_token(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore,
+                        market_id: str, event_id: str, token_id: str, outcome: str) -> dict:
+    """Process a single token with concurrency control."""
+    async with semaphore:
+        history = await fetch_price_history(session, token_id, INTERVAL, FIDELITY)
+        return {
+            'market_id': market_id,
+            'event_id': event_id,
+            'token_id': token_id,
+            'outcome': outcome,
+            'history': history
+        }
 
-if __name__ == "__main__":
+
+async def process_market_tokens(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore,
+                                 conn: sqlite3.Connection, market_id: str, event_id: str,
+                                 tokens: list[tuple[str, str]]) -> dict:
+    """Process all tokens for a market concurrently."""
+    tasks = []
+    token_info = []
+
+    for token_id, outcome in tokens:
+        if should_skip_token(conn, token_id):
+            last_ts = get_last_update_time(conn, token_id)
+            age_hours = (int(time.time()) - last_ts) / 3600
+            print(f"  [{outcome}] token={token_id[:20]}...  → skipped (updated {age_hours:.1f}h ago)")
+            token_info.append({'skipped': True})
+        else:
+            task = process_token(session, semaphore, market_id, event_id, token_id, outcome)
+            tasks.append(task)
+            token_info.append({'skipped': False, 'token_id': token_id, 'outcome': outcome})
+
+    if not tasks:
+        return {'total_rows': 0, 'errors': 0, 'skipped': len(token_info)}
+
+    results = await asyncio.gather(*tasks)
+
+    total_rows = 0
+    errors = 0
+
+    for result in results:
+        token_id = result['token_id']
+        outcome = result['outcome']
+        history = result['history']
+
+        if history:
+            n = save_rows(conn, result['market_id'], result['event_id'],
+                         token_id, outcome, history)
+            total_rows += n
+            print(f"  [{outcome}] token={token_id[:20]}...  → {n} points")
+        else:
+            errors += 1
+            print(f"  [{outcome}] token={token_id[:20]}...  → no data")
+
+    return {
+        'total_rows': total_rows,
+        'errors': errors,
+        'skipped': sum(1 for t in token_info if t.get('skipped', False))
+    }
+
+
+async def main():
     # 1. Load market IDs from database
     markets = get_market_ids(DB_PATH)
     if not markets:
@@ -171,44 +231,31 @@ if __name__ == "__main__":
 
     # 4. Fetch & store price history for each market
     total_rows = 0
-    errors     = 0
+    errors = 0
     skipped_markets = 0
-    skipped_tokens  = 0
+    skipped_tokens = 0
 
-    for i, row in enumerate(markets, 1):
-        mid = row["market_id"]
-        eid = row["event_id"]
-        print(f"[{i:>4}/{len(markets)}] market={mid}  event={eid}")
+    # Create semaphore for concurrency control
+    semaphore = asyncio.Semaphore(CONCURRENT_LIMIT)
 
-        # Get token IDs from database
-        tokens = get_token_ids_from_db(conn, mid)
-        if not tokens:
-            print(f"  → No tokens found in DB, skipping")
-            skipped_markets += 1
-            continue
+    async with aiohttp.ClientSession() as session:
+        for i, row in enumerate(markets, 1):
+            mid = row["market_id"]
+            eid = row["event_id"]
+            print(f"[{i:>4}/{len(markets)}] market={mid}  event={eid}")
 
-        # Fetch price history for each outcome token
-        for token_id, outcome in tokens:
-            # Check if we should skip this token
-            if should_skip_token(conn, token_id):
-                last_ts = get_last_update_time(conn, token_id)
-                age_hours = (int(time.time()) - last_ts) / 3600
-                print(f"  [{outcome}] token={token_id[:20]}...  → skipped (updated {age_hours:.1f}h ago)")
-                skipped_tokens += 1
+            # Get token IDs from database
+            tokens = get_token_ids_from_db(conn, mid)
+            if not tokens:
+                print(f"  → No tokens found in DB, skipping")
+                skipped_markets += 1
                 continue
 
-            print(f"  [{outcome}] token={token_id[:20]}...", end="  ")
-            history = fetch_price_history(token_id, INTERVAL, FIDELITY)
-
-            if history:
-                n = save_rows(conn, mid, eid, token_id, outcome, history)
-                total_rows += n
-                print(f"→ {n} points")
-            else:
-                errors += 1
-                print("→ no data")
-
-            time.sleep(RATE_LIMIT)
+            # Process all tokens for this market concurrently
+            result = await process_market_tokens(session, semaphore, conn, mid, eid, tokens)
+            total_rows += result['total_rows']
+            errors += result['errors']
+            skipped_tokens += result['skipped']
 
     conn.close()
 
@@ -220,3 +267,7 @@ if __name__ == "__main__":
     print(f"       Total rows saved  : {total_rows}")
     print(f"       Errors            : {errors}")
     print(f"       Database          : {DB_PATH}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
