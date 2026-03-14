@@ -51,31 +51,49 @@ def get_token_ids_from_db(conn: sqlite3.Connection, market_id: str) -> list[tupl
     return cur.fetchall()
 
 
-def get_last_update_time(conn: sqlite3.Connection, token_id: str) -> int:
-    """Get the most recent timestamp for a token in price_history. Returns 0 if not found."""
+def get_last_fetch_time(conn: sqlite3.Connection, market_id: str) -> int:
+    """Get the last price fetch time for a market. Returns 0 if not found."""
     cur = conn.cursor()
     cur.execute("""
-        SELECT MAX(ts) as last_ts
-        FROM price_history
-        WHERE token_id = ?
-    """, (token_id,))
+        SELECT last_price_fetch
+        FROM markets
+        WHERE market_id = ?
+    """, (market_id,))
     result = cur.fetchone()
     return result[0] if result and result[0] else 0
 
 
-def should_skip_token(conn: sqlite3.Connection, token_id: str) -> bool:
-    """Check if token was updated recently and should be skipped in incremental mode."""
+def should_skip_market(conn: sqlite3.Connection, market_id: str, skip_threshold: int = SKIP_THRESHOLD) -> bool:
+    """Check if market was fetched recently and should be skipped in incremental mode.
+
+    Args:
+        conn: Database connection
+        market_id: Market ID to check
+        skip_threshold: Skip markets updated within this many seconds (default: 86400 = 24 hours)
+    """
     if not INCREMENTAL_MODE:
         return False
 
-    last_ts = get_last_update_time(conn, token_id)
+    last_ts = get_last_fetch_time(conn, market_id)
     if last_ts == 0:
         return False  # Never fetched, don't skip
 
     current_ts = int(time.time())
     age = current_ts - last_ts
 
-    return age < SKIP_THRESHOLD
+    return age < skip_threshold
+
+
+def update_last_fetch_time(conn: sqlite3.Connection, market_id: str):
+    """Update the last_price_fetch timestamp for a market."""
+    current_ts = int(time.time())
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE markets
+        SET last_price_fetch = ?
+        WHERE market_id = ?
+    """, (current_ts, market_id))
+    conn.commit()
 
 
 async def fetch_price_history(session: aiohttp.ClientSession, token_id: str,
@@ -165,21 +183,13 @@ async def process_market_tokens(session: aiohttp.ClientSession, semaphore: async
                                  tokens: list[tuple[str, str]]) -> dict:
     """Process all tokens for a market concurrently."""
     tasks = []
-    token_info = []
 
     for token_id, outcome in tokens:
-        if should_skip_token(conn, token_id):
-            last_ts = get_last_update_time(conn, token_id)
-            age_hours = (int(time.time()) - last_ts) / 3600
-            print(f"  [{outcome}] token={token_id[:20]}...  → skipped (updated {age_hours:.1f}h ago)")
-            token_info.append({'skipped': True})
-        else:
-            task = process_token(session, semaphore, market_id, event_id, token_id, outcome)
-            tasks.append(task)
-            token_info.append({'skipped': False, 'token_id': token_id, 'outcome': outcome})
+        task = process_token(session, semaphore, market_id, event_id, token_id, outcome)
+        tasks.append(task)
 
     if not tasks:
-        return {'total_rows': 0, 'errors': 0, 'skipped': len(token_info)}
+        return {'total_rows': 0, 'errors': 0, 'skipped': 0}
 
     results = await asyncio.gather(*tasks)
 
@@ -203,28 +213,39 @@ async def process_market_tokens(session: aiohttp.ClientSession, semaphore: async
     return {
         'total_rows': total_rows,
         'errors': errors,
-        'skipped': sum(1 for t in token_info if t.get('skipped', False))
+        'skipped': 0
     }
 
 
-async def main():
+async def main(skip_threshold: int = SKIP_THRESHOLD, db_path: str = DB_PATH,
+               test_mode: bool = TEST_MODE, incremental_mode: bool = INCREMENTAL_MODE):
+    """
+    Main function to fetch price history for all markets.
+
+    Args:
+        skip_threshold: Skip markets updated within this many seconds (default: 86400 = 24 hours)
+        db_path: Path to database (default: ../polymarket.db)
+        test_mode: Process only 2 markets for testing (default: False)
+        incremental_mode: Skip recently updated markets (default: True)
+    """
     # 1. Load market IDs from database
-    markets = get_market_ids(DB_PATH)
+    markets = get_market_ids(db_path)
     if not markets:
         print("[error] No markets found. Check DB path and view name.")
         exit(1)
 
     # Test mode: only process first 2 markets
-    if TEST_MODE:
+    if test_mode:
         markets = markets[:2]
         print(f"[TEST MODE] Processing only {len(markets)} markets\n")
 
-    # Show mode
-    mode_str = "INCREMENTAL" if INCREMENTAL_MODE else "BULK"
-    print(f"[mode] {mode_str} - {'skipping recently updated tokens' if INCREMENTAL_MODE else 'fetching all tokens'}\n")
+    # Show mode and skip threshold
+    mode_str = "INCREMENTAL" if incremental_mode else "BULK"
+    skip_hours = skip_threshold / 3600
+    print(f"[mode] {mode_str} - {'skipping markets fetched within %.1fh' % skip_hours if incremental_mode else 'fetching all markets'}\n")
 
     # 2. Open database connection
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db_path)
 
     # 3. Ensure price_history table exists
     init_price_history_table(conn)
@@ -233,7 +254,6 @@ async def main():
     total_rows = 0
     errors = 0
     skipped_markets = 0
-    skipped_tokens = 0
 
     # Create semaphore for concurrency control
     semaphore = asyncio.Semaphore(CONCURRENT_LIMIT)
@@ -243,6 +263,14 @@ async def main():
             mid = row["market_id"]
             eid = row["event_id"]
             print(f"[{i:>4}/{len(markets)}] market={mid}  event={eid}")
+
+            # Check if market should be skipped (based on last fetch time)
+            if should_skip_market(conn, mid, skip_threshold):
+                last_ts = get_last_fetch_time(conn, mid)
+                age_hours = (int(time.time()) - last_ts) / 3600
+                print(f"  → skipped (fetched {age_hours:.1f}h ago)")
+                skipped_markets += 1
+                continue
 
             # Get token IDs from database
             tokens = get_token_ids_from_db(conn, mid)
@@ -255,18 +283,20 @@ async def main():
             result = await process_market_tokens(session, semaphore, conn, mid, eid, tokens)
             total_rows += result['total_rows']
             errors += result['errors']
-            skipped_tokens += result['skipped']
+
+            # Update last fetch time for this market
+            if result['total_rows'] > 0:
+                update_last_fetch_time(conn, mid)
 
     conn.close()
 
     # 5. Summary
     print(f"\n{'─'*50}")
-    print(f"Done.  Markets processed : {len(markets)}")
+    print(f"Done.  Markets processed : {len(markets) - skipped_markets}")
     print(f"       Markets skipped   : {skipped_markets}")
-    print(f"       Tokens skipped    : {skipped_tokens}")
     print(f"       Total rows saved  : {total_rows}")
     print(f"       Errors            : {errors}")
-    print(f"       Database          : {DB_PATH}")
+    print(f"       Database          : {db_path}")
 
 
 if __name__ == "__main__":
