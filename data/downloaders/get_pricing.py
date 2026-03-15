@@ -8,21 +8,62 @@ import asyncio
 import aiohttp
 import time
 from datetime import datetime
+from collections import deque
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DB_PATH          = "../polymarket.db"  # Database is in data/ directory
 CLOB_URL         = "https://clob.polymarket.com/prices-history"
-INTERVAL         = "max"      # max = all available data (works for new and old markets)
+STARTTS         = 1      # max = all available data (works for new and old markets)
 FIDELITY         = None       # Not used with interval=max
 CONCURRENT_LIMIT = 20         # Max concurrent requests (increased from 4 req/s)
+RATE_LIMIT       = 1000       # Max requests per RATE_WINDOW
+RATE_WINDOW      = 10         # Time window in seconds for rate limiting
 TEST_MODE        = False      # Set to True to test with just 2 markets
 INCREMENTAL_MODE = True       # Set to False to fetch all, True to skip recently updated tokens
-SKIP_THRESHOLD   = 86400      # Skip tokens updated within this many seconds (86400 = 24 hours)
+SKIP_THRESHOLD   = 186400      # Skip tokens updated within this many seconds (86400 = 24 hours)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+class RateLimiter:
+    """Sliding window rate limiter to ensure max requests per time window."""
+
+    def __init__(self, max_requests: int, window_seconds: float):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.requests = deque()
+        self.lock = asyncio.Lock()
+
+    async def acquire(self):
+        """Wait until a request can be made within rate limits."""
+        async with self.lock:
+            now = time.time()
+
+            # Remove timestamps outside the window
+            while self.requests and self.requests[0] <= now - self.window_seconds:
+                self.requests.popleft()
+
+            # If at limit, wait until oldest request expires
+            if len(self.requests) >= self.max_requests:
+                sleep_time = self.requests[0] + self.window_seconds - now
+                if sleep_time > 0:
+                    await asyncio.sleep(sleep_time)
+                    # Clean up again after sleeping
+                    now = time.time()
+                    while self.requests and self.requests[0] <= now - self.window_seconds:
+                        self.requests.popleft()
+
+            # Record this request
+            self.requests.append(time.time())
+
+
 def get_market_ids(db_path: str) -> list[dict]:
-    """Pull distinct market_id + event_id from the view, ordered by creation date DESC."""
+    """Pull distinct market_id + event_id from the view, ordered by creation date DESC.
+
+    Filters for markets that are more likely to have price history:
+    - Active markets (active = 1)
+    - Markets with trading volume (volume > 100)
+    - Not closed yet (closed = 0) OR recently closed
+    """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -30,12 +71,15 @@ def get_market_ids(db_path: str) -> list[dict]:
         SELECT DISTINCT market_id, event_id
         FROM bets_for_timing_view
         WHERE market_id IS NOT NULL
+          AND active = 1
+          AND volume > 100
         ORDER BY created_at DESC
     """)
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     print(f"[db] Found {len(rows)} distinct markets across "
           f"{len(set(r['event_id'] for r in rows))} events")
+    print(f"     (filtered for: active=1, volume>100)")
     return rows
 
 
@@ -97,14 +141,18 @@ def update_last_fetch_time(conn: sqlite3.Connection, market_id: str):
 
 
 async def fetch_price_history(session: aiohttp.ClientSession, token_id: str,
-                               interval: str = INTERVAL, fidelity: int = FIDELITY) -> list[dict]:
+                               rate_limiter: RateLimiter,
+                               startTs: str = STARTTS, fidelity: int = FIDELITY) -> list[dict]:
     """Call Polymarket /prices-history for one token_id asynchronously."""
     params = {
         "market": token_id,
-        "interval": interval,
+        "startTs": startTs,
     }
-    if fidelity is not None:
-        params["fidelity"] = fidelity
+    #if fidelity is not None:
+    #    params["fidelity"] = fidelity
+
+    # Wait for rate limiter before making request
+    await rate_limiter.acquire()
 
     try:
         async with session.get(CLOB_URL, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
@@ -165,10 +213,11 @@ def save_rows(conn: sqlite3.Connection, market_id: str, event_id: str,
 
 
 async def process_token(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore,
+                        rate_limiter: RateLimiter,
                         market_id: str, event_id: str, token_id: str, outcome: str) -> dict:
     """Process a single token with concurrency control."""
     async with semaphore:
-        history = await fetch_price_history(session, token_id, INTERVAL, FIDELITY)
+        history = await fetch_price_history(session, token_id, rate_limiter, STARTTS, FIDELITY)
         return {
             'market_id': market_id,
             'event_id': event_id,
@@ -179,13 +228,14 @@ async def process_token(session: aiohttp.ClientSession, semaphore: asyncio.Semap
 
 
 async def process_market_tokens(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore,
+                                 rate_limiter: RateLimiter,
                                  conn: sqlite3.Connection, market_id: str, event_id: str,
                                  tokens: list[tuple[str, str]]) -> dict:
     """Process all tokens for a market concurrently."""
     tasks = []
 
     for token_id, outcome in tokens:
-        task = process_token(session, semaphore, market_id, event_id, token_id, outcome)
+        task = process_token(session, semaphore, rate_limiter, market_id, event_id, token_id, outcome)
         tasks.append(task)
 
     if not tasks:
@@ -255,8 +305,9 @@ async def main(skip_threshold: int = SKIP_THRESHOLD, db_path: str = DB_PATH,
     errors = 0
     skipped_markets = 0
 
-    # Create semaphore for concurrency control
+    # Create semaphore for concurrency control and rate limiter
     semaphore = asyncio.Semaphore(CONCURRENT_LIMIT)
+    rate_limiter = RateLimiter(RATE_LIMIT, RATE_WINDOW)
 
     async with aiohttp.ClientSession() as session:
         for i, row in enumerate(markets, 1):
@@ -280,7 +331,7 @@ async def main(skip_threshold: int = SKIP_THRESHOLD, db_path: str = DB_PATH,
                 continue
 
             # Process all tokens for this market concurrently
-            result = await process_market_tokens(session, semaphore, conn, mid, eid, tokens)
+            result = await process_market_tokens(session, semaphore, rate_limiter, conn, mid, eid, tokens)
             total_rows += result['total_rows']
             errors += result['errors']
 
