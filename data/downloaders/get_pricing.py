@@ -15,6 +15,7 @@ DB_PATH          = "../polymarket.db"  # Database is in data/ directory
 CLOB_URL         = "https://clob.polymarket.com/prices-history"
 STARTTS         = 1      # max = all available data (works for new and old markets)
 FIDELITY         = None       # Not used with interval=max
+# NOTE: API interval parameter is broken, so we aggregate to 1-hour intervals client-side
 CONCURRENT_LIMIT = 20         # Max concurrent requests (increased from 4 req/s)
 RATE_LIMIT       = 1000       # Max requests per RATE_WINDOW
 RATE_WINDOW      = 10         # Time window in seconds for rate limiting
@@ -143,11 +144,15 @@ def update_last_fetch_time(conn: sqlite3.Connection, market_id: str):
 async def fetch_price_history(session: aiohttp.ClientSession, token_id: str,
                                rate_limiter: RateLimiter,
                                startTs: str = STARTTS, fidelity: int = FIDELITY) -> list[dict]:
-    """Call Polymarket /prices-history for one token_id asynchronously."""
+    """Call Polymarket /prices-history for one token_id asynchronously.
+
+    Note: API interval parameter is broken, so we fetch raw data and aggregate client-side.
+    """
     params = {
         "market": token_id,
         "startTs": startTs,
     }
+    # Note: interval parameter removed as API implementation is broken
     #if fidelity is not None:
     #    params["fidelity"] = fidelity
 
@@ -188,7 +193,57 @@ def init_price_history_table(conn: sqlite3.Connection):
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_market ON price_history(market_id)
     """)
+
+    # Ensure markets table has last_price_fetch column for incremental mode
+    try:
+        conn.execute("""
+            ALTER TABLE markets ADD COLUMN last_price_fetch INTEGER DEFAULT 0
+        """)
+    except sqlite3.OperationalError as e:
+        # Column already exists, ignore
+        if "duplicate column name" not in str(e).lower():
+            raise
+
     conn.commit()
+
+
+def aggregate_to_hourly(history: list[dict]) -> list[dict]:
+    """Aggregate price history to 1-hour intervals using last (close) price.
+
+    Args:
+        history: List of dicts with 't' (timestamp) and 'p' (price)
+
+    Returns:
+        Aggregated list with one entry per hour (using the last price in each hour)
+    """
+    if not history:
+        return []
+
+    # Group by hour
+    hourly_data = {}
+    for point in history:
+        ts = point.get("t")
+        price = point.get("p")
+        if ts is None or price is None:
+            continue
+
+        # Floor timestamp to the hour
+        hour_ts = (ts // 3600) * 3600
+
+        # Store all points for this hour, we'll take the last one
+        if hour_ts not in hourly_data:
+            hourly_data[hour_ts] = []
+        hourly_data[hour_ts].append((ts, price))
+
+    # For each hour, take the last (highest timestamp) price
+    aggregated = []
+    for hour_ts in sorted(hourly_data.keys()):
+        # Sort by timestamp and take the last one
+        points = sorted(hourly_data[hour_ts], key=lambda x: x[0])
+        last_ts, last_price = points[-1]
+        aggregated.append({"t": hour_ts, "p": last_price})
+
+    return aggregated
 
 
 def save_rows(conn: sqlite3.Connection, market_id: str, event_id: str,
@@ -252,10 +307,12 @@ async def process_market_tokens(session: aiohttp.ClientSession, semaphore: async
         history = result['history']
 
         if history:
+            # Aggregate to 1-hour intervals before saving
+            aggregated_history = aggregate_to_hourly(history)
             n = save_rows(conn, result['market_id'], result['event_id'],
-                         token_id, outcome, history)
+                         token_id, outcome, aggregated_history)
             total_rows += n
-            print(f"  [{outcome}] token={token_id[:20]}...  → {n} points")
+            print(f"  [{outcome}] token={token_id[:20]}...  → {n} points (aggregated from {len(history)})")
         else:
             errors += 1
             print(f"  [{outcome}] token={token_id[:20]}...  → no data")
@@ -277,6 +334,8 @@ async def main(skip_threshold: int = SKIP_THRESHOLD, db_path: str = DB_PATH,
         db_path: Path to database (default: ../polymarket.db)
         test_mode: Process only 2 markets for testing (default: False)
         incremental_mode: Skip recently updated markets (default: True)
+
+    Note: Data is aggregated to 1-hour intervals client-side using the last (close) price.
     """
     # 1. Load market IDs from database
     markets = get_market_ids(db_path)

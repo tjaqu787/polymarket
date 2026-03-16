@@ -1,12 +1,5 @@
 PRAGMA foreign_keys = ON;
 
--- Show count before changes
-SELECT 'Markets count BEFORE:' AS status, COUNT(*) AS n_markets FROM markets WHERE EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='markets')
-UNION ALL
-SELECT 'Markets count BEFORE:' AS status, COUNT(*) AS n_markets FROM markets WHERE EXISTS (SELECT 1 FROM sqlite_master WHERE type='view' AND name='markets')
-UNION ALL
-SELECT 'Markets count BEFORE:' AS status, 0 AS n_markets WHERE NOT EXISTS (SELECT 1 FROM sqlite_master WHERE name='markets');
-
 BEGIN TRANSACTION;
 
 -- Drop the old table/view if it exists
