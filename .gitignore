@@ -7,3 +7,5 @@ data/polymarket.db
 *.db-shm
 */__pycache__/*
 data/downloaders/__pycache__/get_all_events.cpython-312.pyc
+backtest/strategies/__pycache__/*
+.clinerules
