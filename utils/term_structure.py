@@ -8,13 +8,12 @@ similar to yield curve analysis in fixed income markets.
 import sqlite3
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 from datetime import datetime
 from typing import Optional, Tuple, Dict
 from scipy.optimize import minimize
 from scipy.interpolate import UnivariateSpline
 
-from implied_rates import (
+from .implied_rates import (
     load_price_history,
     calculate_implied_rates_for_market_group,
     get_market_groups
@@ -92,19 +91,6 @@ class TermStructure:
         else:
             # Linear interpolation
             return np.interp(target_maturities, self.maturities, self.rates)
-
-    def plot(self, ax=None, **kwargs):
-        """Plot the term structure."""
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(10, 6))
-
-        ax.plot(self.maturities, self.rates * 100, 'o-', **kwargs)
-        ax.set_xlabel('Time to Maturity (years)')
-        ax.set_ylabel('Implied Rate (%)')
-        ax.set_title(f'Term Structure - {self.date}')
-        ax.grid(True, alpha=0.3)
-
-        return ax
 
 
 def extract_term_structure(df: pd.DataFrame, observation_date: str,
@@ -261,84 +247,8 @@ def fit_nelson_siegel(ts: TermStructure) -> Tuple[Dict[str, float], np.ndarray]:
         return None, None
 
 
-def plot_term_structure_evolution(term_structures: Dict[str, TermStructure],
-                                  dates_to_plot: list = None,
-                                  figsize=(12, 8)):
-    """
-    Plot term structure evolution over time.
-
-    Args:
-        term_structures: Dictionary of date -> TermStructure
-        dates_to_plot: List of dates to plot (if None, plots evenly spaced subset)
-        figsize: Figure size
-    """
-    if dates_to_plot is None:
-        # Plot evenly spaced dates (max 10)
-        all_dates = sorted(term_structures.keys())
-        n = min(10, len(all_dates))
-        step = max(1, len(all_dates) // n)
-        dates_to_plot = all_dates[::step]
-
-    fig, ax = plt.subplots(figsize=figsize)
-
-    # Color map
-    colors = plt.cm.viridis(np.linspace(0, 1, len(dates_to_plot)))
-
-    for i, date in enumerate(dates_to_plot):
-        if date in term_structures:
-            ts = term_structures[date]
-            ax.plot(ts.maturities, ts.rates * 100, 'o-',
-                   color=colors[i], label=date, alpha=0.7)
-
-    ax.set_xlabel('Time to Maturity (years)')
-    ax.set_ylabel('Implied Rate (%)')
-    ax.set_title('Term Structure Evolution')
-    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-
-    return fig, ax
-
-
-def plot_term_structure_metrics(metrics_df: pd.DataFrame, figsize=(14, 8)):
-    """
-    Plot term structure metrics over time.
-
-    Args:
-        metrics_df: DataFrame from calculate_term_structure_metrics
-        figsize: Figure size
-    """
-    fig, axes = plt.subplots(3, 1, figsize=figsize, sharex=True)
-
-    metrics_df['date_dt'] = pd.to_datetime(metrics_df['date'])
-
-    # Level
-    axes[0].plot(metrics_df['date_dt'], metrics_df['level'] * 100, 'b-', linewidth=2)
-    axes[0].set_ylabel('Level (%)')
-    axes[0].set_title('Term Structure Level (Average Rate)')
-    axes[0].grid(True, alpha=0.3)
-
-    # Slope
-    axes[1].plot(metrics_df['date_dt'], metrics_df['slope'] * 100, 'g-', linewidth=2)
-    axes[1].axhline(0, color='k', linestyle='--', alpha=0.3)
-    axes[1].set_ylabel('Slope (%)')
-    axes[1].set_title('Term Structure Slope (Long - Short)')
-    axes[1].grid(True, alpha=0.3)
-
-    # Curvature
-    axes[2].plot(metrics_df['date_dt'], metrics_df['curvature'] * 100, 'r-', linewidth=2)
-    axes[2].axhline(0, color='k', linestyle='--', alpha=0.3)
-    axes[2].set_ylabel('Curvature (%)')
-    axes[2].set_xlabel('Date')
-    axes[2].set_title('Term Structure Curvature')
-    axes[2].grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    return fig, axes
-
-
 def analyze_event_term_structure(event_id: str, db_path: str = "data/polymarket.db",
-                                 outcome: str = 'Yes', plot: bool = True) -> Dict:
+                                 outcome: str = 'Yes') -> Dict:
     """
     Complete term structure analysis for a single event.
 
@@ -346,7 +256,6 @@ def analyze_event_term_structure(event_id: str, db_path: str = "data/polymarket.
         event_id: Event ID to analyze
         db_path: Path to database
         outcome: Outcome to analyze
-        plot: Whether to generate plots
 
     Returns:
         Dictionary with analysis results
@@ -392,26 +301,6 @@ def analyze_event_term_structure(event_id: str, db_path: str = "data/polymarket.
         'df_rates': df_rates
     }
 
-    if plot:
-        print("Generating plots...")
-
-        # Plot 1: Latest term structure
-        fig1, ax1 = plt.subplots(figsize=(10, 6))
-        latest_ts.plot(ax=ax1)
-        ax1.set_title(f'Term Structure - {latest_ts.event_title}\n{latest_date}')
-
-        # Plot 2: Term structure evolution
-        fig2, ax2 = plot_term_structure_evolution(term_structures)
-        fig2.suptitle(f'{latest_ts.event_title}', y=1.02, fontsize=12)
-
-        # Plot 3: Metrics over time
-        fig3, axes3 = plot_term_structure_metrics(metrics)
-        fig3.suptitle(f'{latest_ts.event_title} - Term Structure Metrics', y=1.00, fontsize=12)
-
-        plt.show()
-
-        results['figures'] = [fig1, fig2, fig3]
-
     return results
 
 
@@ -446,7 +335,7 @@ if __name__ == "__main__":
         print(f"\n\nAnalyzing event: {event_id}")
         print(f"Title: {events_df.iloc[0]['event_title']}")
 
-        results = analyze_event_term_structure(event_id, plot=True)
+        results = analyze_event_term_structure(event_id)
 
         if results:
             print("\n" + "="*50)
