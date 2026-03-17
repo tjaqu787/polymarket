@@ -5,15 +5,22 @@ from Polymarket prediction markets over time.
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
 import sys
 sys.path.append('models')
+sys.path.append('utils')
 from implied_rates import (
     get_market_groups,
     load_price_history,
     calculate_implied_rates_for_market_group
+)
+from term_structure import (
+    extract_term_structure_history,
+    calculate_term_structure_metrics,
+    TermStructure
 )
 
 
@@ -98,7 +105,7 @@ st.sidebar.write(f"Markets: {data['market_id'].nunique()}")
 st.sidebar.write(f"Date range: {data['date'].min()} to {data['date'].max()}")
 
 # Main content area
-tab1, tab2, tab3 = st.tabs(["📊 Implied Rates Over Time", "📈 Price Evolution", "📋 Raw Data"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Implied Rates Over Time", "📈 Price Evolution", "📉 Term Structure", "📋 Raw Data"])
 
 with tab1:
     st.header("Implied Interest Rates by Resolution Date")
@@ -256,6 +263,176 @@ with tab2:
     st.plotly_chart(fig_price, use_container_width=True)
 
 with tab3:
+    st.header("Term Structure Analysis")
+
+    st.markdown("""
+    **Term structure analysis** examines how implied rates vary across different time horizons.
+    - **Level**: Average rate across all maturities
+    - **Slope**: Difference between long-term and short-term rates (positive = upward sloping)
+    - **Curvature**: Measure of the bend in the term structure
+    """)
+
+    # Outcome selector for term structure
+    outcome_filter_ts = st.radio(
+        "Select outcome for term structure:",
+        ["Yes", "No"],
+        horizontal=True,
+        key="ts_outcome"
+    )
+
+    # Extract term structures for all dates
+    with st.spinner("Calculating term structure metrics..."):
+        term_structures = extract_term_structure_history(data, outcome_filter=outcome_filter_ts)
+
+        if len(term_structures) == 0:
+            st.warning("No term structure data available for the selected outcome.")
+        else:
+            metrics_df = calculate_term_structure_metrics(term_structures)
+
+            # Plot 1: Term structure metrics over time
+            st.subheader("Term Structure Metrics Over Time")
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric(
+                    "Latest Level",
+                    f"{metrics_df['level'].iloc[-1]*100:.2f}%",
+                    delta=f"{(metrics_df['level'].iloc[-1] - metrics_df['level'].iloc[0])*100:.2f}%" if len(metrics_df) > 1 else None
+                )
+            with col2:
+                st.metric(
+                    "Latest Slope",
+                    f"{metrics_df['slope'].iloc[-1]*100:.2f}%",
+                    delta=f"{(metrics_df['slope'].iloc[-1] - metrics_df['slope'].iloc[0])*100:.2f}%" if len(metrics_df) > 1 else None
+                )
+            with col3:
+                st.metric(
+                    "Latest Curvature",
+                    f"{metrics_df['curvature'].iloc[-1]*100:.2f}%",
+                    delta=f"{(metrics_df['curvature'].iloc[-1] - metrics_df['curvature'].iloc[0])*100:.2f}%" if len(metrics_df) > 1 else None
+                )
+
+            # Create metrics chart
+            fig_metrics = go.Figure()
+
+            fig_metrics.add_trace(go.Scatter(
+                x=metrics_df['date'],
+                y=metrics_df['level'],
+                mode='lines+markers',
+                name='Level',
+                line=dict(color='blue'),
+                yaxis='y'
+            ))
+
+            fig_metrics.add_trace(go.Scatter(
+                x=metrics_df['date'],
+                y=metrics_df['slope'],
+                mode='lines+markers',
+                name='Slope',
+                line=dict(color='red'),
+                yaxis='y'
+            ))
+
+            fig_metrics.add_trace(go.Scatter(
+                x=metrics_df['date'],
+                y=metrics_df['curvature'],
+                mode='lines+markers',
+                name='Curvature',
+                line=dict(color='green'),
+                yaxis='y'
+            ))
+
+            fig_metrics.update_layout(
+                title=f"Term Structure Metrics - {outcome_filter_ts} Outcome",
+                xaxis_title="Date",
+                yaxis_title="Rate",
+                yaxis_tickformat=".1%",
+                hovermode='x unified',
+                height=500,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
+            )
+
+            st.plotly_chart(fig_metrics, use_container_width=True)
+
+            # Plot 2: Term structure curves for selected dates
+            st.subheader("Term Structure Curves")
+
+            # Let user select dates to compare
+            available_dates = sorted(term_structures.keys())
+
+            # Default to showing up to 5 recent dates
+            default_dates = available_dates[-5:] if len(available_dates) >= 5 else available_dates
+
+            selected_dates = st.multiselect(
+                "Select dates to display term structure curves:",
+                available_dates,
+                default=default_dates
+            )
+
+            if len(selected_dates) > 0:
+                fig_curves = go.Figure()
+
+                colors_ts = px.colors.qualitative.Set2
+
+                for i, date in enumerate(selected_dates):
+                    ts = term_structures[date]
+                    color = colors_ts[i % len(colors_ts)]
+
+                    # Sort by maturity for proper line plotting
+                    sort_idx = np.argsort(ts.maturities)
+
+                    fig_curves.add_trace(go.Scatter(
+                        x=ts.maturities[sort_idx],
+                        y=ts.rates[sort_idx],
+                        mode='lines+markers',
+                        name=date,
+                        line=dict(color=color),
+                        marker=dict(size=8, color=color),
+                        hovertemplate=(
+                            f"<b>{date}</b><br>" +
+                            "Time to Maturity: %{x:.3f} years<br>" +
+                            "Implied Rate: %{y:.2%}<br>" +
+                            "<extra></extra>"
+                        )
+                    ))
+
+                fig_curves.update_layout(
+                    title=f"Term Structure Curves - {outcome_filter_ts} Outcome",
+                    xaxis_title="Time to Maturity (Years)",
+                    yaxis_title="Implied Rate",
+                    yaxis_tickformat=".1%",
+                    hovermode='closest',
+                    height=500,
+                    legend=dict(
+                        orientation="v",
+                        yanchor="top",
+                        y=1,
+                        xanchor="left",
+                        x=1.02
+                    )
+                )
+
+                st.plotly_chart(fig_curves, use_container_width=True)
+
+                st.markdown("""
+                **Interpretation:**
+                - **Upward sloping** (positive slope): Short-term rates < long-term rates, typical for normal markets
+                - **Flat**: Similar rates across all maturities
+                - **Inverted** (negative slope): Short-term rates > long-term rates, may signal uncertainty
+                - **Humped** (positive curvature): Medium-term rates higher than both short and long term
+                """)
+
+            # Show summary statistics
+            with st.expander("View Term Structure Statistics"):
+                st.dataframe(metrics_df, use_container_width=True)
+
+with tab4:
     st.header("Raw Data")
 
     # Display raw data with filters
