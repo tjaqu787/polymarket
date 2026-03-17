@@ -1,0 +1,61 @@
+Slug/Text tokenization + cooccurrence deliverable
+===============================================
+
+DB: C:\Users\jamie\Documents\polymarket.db
+timing_markets_base count: 12030
+timing_text_features count: 12030
+unique tokens: 7020
+unique token pairs: 83609
+
+Top 20 tokens (by df):
+  2026	1992
+  win	1331
+  december	1278
+  february	1062
+  march	1050
+  trump	1031
+  us	827
+  2025	769
+  january	768
+  june	760
+  more	740
+  2027	646
+  ufc	630
+  hit	602
+  points	567
+  company	554
+  market	529
+  cap	529
+  largest	523
+  july	513
+
+Top 20 token pairs (by co_df):
+  (ufc, win)	623
+  (cap, market)	524
+  (company, largest)	506
+  (cap, company)	500
+  (cap, largest)	500
+  (cap, world)	500
+  (company, market)	500
+  (company, world)	500
+  (largest, market)	500
+  (largest, world)	500
+  (market, world)	500
+  (more, points)	490
+  (beat, points)	424
+  (beat, more)	422
+  (ko, win)	412
+  (ko, tko)	409
+  (ko, ufc)	408
+  (tko, ufc)	408
+  (tko, win)	408
+  (2026, win)	382
+
+Exports created:
+  C:\Users\jamie\Documents\polymarket\submissions\slug_cooccurrence\token_stats_top500.csv
+  C:\Users\jamie\Documents\polymarket\submissions\slug_cooccurrence\token_cooccurrence_top500.csv
+  C:\Users\jamie\Documents\polymarket\submissions\slug_cooccurrence\tokens_per_market_sample.csv
+  C:\Users\jamie\Documents\polymarket\submissions\slug_cooccurrence\timing_markets_base_ids.csv
+
+Reproduce:
+  python scripts/build_slug_cooccurrence.py --db C:\Users\jamie\Documents\polymarket.db --source timing_markets_base --id-col market_id --text-col text_for_tokens
