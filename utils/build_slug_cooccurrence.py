@@ -6,10 +6,18 @@ from collections import Counter
 from itertools import combinations
 
 STOPWORDS = {
+    # Common words
     "a","an","and","are","as","at","be","by","for","from","has","have","how",
     "if","in","is","it","its","of","on","or","s","she","he","they","the","to",
     "was","were","will","with","what","when","where","who","whom","why","would",
-    "vs","versus","before","until","yes","no"
+    "vs","versus","before","until","yes","no",
+    # Months (full names)
+    "january","february","march","april","may","june","july","august",
+    "september","october","november","december",
+    # Months (short forms)
+    "jan","feb","mar","apr","jun","jul","aug","sep","sept","oct","nov","dec",
+    # Years
+    "2020","2021","2022","2023","2024","2025","2026","2027","2028","2029","2030"
 }
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
