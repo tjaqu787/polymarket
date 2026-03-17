@@ -9,7 +9,7 @@ STOPWORDS = {
     # Common words
     "a","an","and","are","as","at","be","by","for","from","has","have","how",
     "if","in","is","it","its","of","on","or","s","she","he","they","the","to",
-    "was","were","will","with","what","when","where","who","whom","why","would",
+    "was","were","there","will","with","what","when","where","who","whom","why","would",
     "vs","versus","before","until","yes","no",
     # Months (full names)
     "january","february","march","april","may","june","july","august",
