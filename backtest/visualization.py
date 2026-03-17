@@ -1,170 +1,216 @@
 """
-Visualization utilities for backtest results.
+Streamlit visualization dashboard for backtest results.
 """
 
+import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from typing import Dict, Optional
 
 
-def plot_backtest_results(results: Dict, output_file: Optional[str] = None) -> go.Figure:
+def create_backtest_dashboard(results: Dict) -> None:
     """
-    Create comprehensive visualization of backtest results.
+    Create Streamlit dashboard for backtest results.
 
     Args:
-        results: Backtest results dictionary
-        output_file: Optional file path to save HTML plot
-
-    Returns:
-        Plotly figure
+        results: Backtest results dictionary containing:
+            - strategy_name: str
+            - initial_capital: float
+            - final_value: float
+            - total_return: float
+            - annualized_return: float
+            - sharpe_ratio: float
+            - max_drawdown: float
+            - num_trades: int
+            - win_rate: float
+            - average_win: float
+            - average_loss: float
+            - history: DataFrame with columns [date, total_value, num_positions]
+            - trades: DataFrame with trade details
+            - daily_returns: array of daily returns
     """
+    st.title(f"Backtest Results: {results['strategy_name']}")
+
     history = results['history']
     trades = results['trades']
 
-    # Create subplots
-    fig = make_subplots(
-        rows=4, cols=2,
-        subplot_titles=(
-            'Portfolio Value Over Time',
-            'Drawdown',
-            'Daily Returns Distribution',
-            'Cumulative Returns',
-            'Number of Open Positions',
-            'Trade P&L Distribution',
-            'Win/Loss Ratio Over Time',
-            'Monthly Returns Heatmap'
-        ),
-        specs=[
-            [{"secondary_y": False}, {"secondary_y": False}],
-            [{"secondary_y": False}, {"secondary_y": False}],
-            [{"secondary_y": False}, {"secondary_y": False}],
-            [{"secondary_y": False}, {"type": "heatmap"}]
-        ],
-        vertical_spacing=0.12,
-        horizontal_spacing=0.12
-    )
+    # Key metrics in columns
+    col1, col2, col3, col4 = st.columns(4)
 
-    # 1. Portfolio value over time
-    fig.add_trace(
-        go.Scatter(
+    with col1:
+        st.metric(
+            "Final Portfolio Value",
+            f"${results['final_value']:,.2f}",
+            f"{results['total_return']:.2f}%"
+        )
+
+    with col2:
+        st.metric(
+            "Total Return",
+            f"{results['total_return']:.2f}%",
+            f"{results['annualized_return']:.2f}% annualized"
+        )
+
+    with col3:
+        st.metric(
+            "Sharpe Ratio",
+            f"{results['sharpe_ratio']:.2f}"
+        )
+
+    with col4:
+        st.metric(
+            "Max Drawdown",
+            f"{results['max_drawdown']:.2f}%"
+        )
+
+    # Additional metrics
+    col5, col6, col7, col8 = st.columns(4)
+
+    with col5:
+        st.metric("Total Trades", results['num_trades'])
+
+    with col6:
+        st.metric("Win Rate", f"{results['win_rate']:.1f}%")
+
+    with col7:
+        st.metric("Avg Win", f"${results['average_win']:.2f}")
+
+    with col8:
+        st.metric("Avg Loss", f"${results['average_loss']:.2f}")
+
+    st.divider()
+
+    # Portfolio Value and Drawdown
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Portfolio Value Over Time")
+        fig1 = go.Figure()
+        fig1.add_trace(go.Scatter(
             x=history['date'],
             y=history['total_value'],
             name='Portfolio Value',
             line=dict(color='blue', width=2),
             hovertemplate='%{x}<br>Value: $%{y:,.2f}<extra></extra>'
-        ),
-        row=1, col=1
-    )
+        ))
+        fig1.add_hline(
+            y=results['initial_capital'],
+            line_dash="dash",
+            line_color="gray",
+            annotation_text="Initial Capital"
+        )
+        fig1.update_layout(xaxis_title="Date", yaxis_title="Portfolio Value ($)", height=400)
+        st.plotly_chart(fig1, use_container_width=True)
 
-    # Add initial capital line
-    fig.add_hline(
-        y=results['initial_capital'],
-        line_dash="dash",
-        line_color="gray",
-        annotation_text="Initial Capital",
-        row=1, col=1
-    )
+    with col2:
+        st.subheader("Drawdown")
+        portfolio_values = history['total_value'].values
+        cummax = np.maximum.accumulate(portfolio_values)
+        drawdown = (portfolio_values - cummax) / cummax * 100
 
-    # 2. Drawdown
-    portfolio_values = history['total_value'].values
-    cummax = np.maximum.accumulate(portfolio_values)
-    drawdown = (portfolio_values - cummax) / cummax * 100
-
-    fig.add_trace(
-        go.Scatter(
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(
             x=history['date'],
             y=drawdown,
-            name='Drawdown',
             fill='tozeroy',
             line=dict(color='red', width=1),
             hovertemplate='%{x}<br>Drawdown: %{y:.2f}%<extra></extra>'
-        ),
-        row=1, col=2
-    )
+        ))
+        fig2.update_layout(xaxis_title="Date", yaxis_title="Drawdown (%)", height=400)
+        st.plotly_chart(fig2, use_container_width=True)
 
-    # 3. Daily returns distribution
-    if 'daily_returns' in results and len(results['daily_returns']) > 0:
-        returns = results['daily_returns'] * 100  # Convert to percentage
+    # Returns
+    col1, col2 = st.columns(2)
 
-        fig.add_trace(
-            go.Histogram(
+    with col1:
+        st.subheader("Daily Returns Distribution")
+        if 'daily_returns' in results and len(results['daily_returns']) > 0:
+            returns = results['daily_returns'] * 100
+            fig3 = go.Figure()
+            fig3.add_trace(go.Histogram(
                 x=returns,
-                name='Returns',
                 nbinsx=50,
                 marker_color='lightblue',
                 hovertemplate='Return: %{x:.2f}%<br>Count: %{y}<extra></extra>'
-            ),
-            row=2, col=1
-        )
+            ))
+            fig3.update_layout(xaxis_title="Daily Return (%)", yaxis_title="Frequency", height=400)
+            st.plotly_chart(fig3, use_container_width=True)
 
-    # 4. Cumulative returns
-    history['cumulative_return'] = (history['total_value'] / results['initial_capital'] - 1) * 100
+    with col2:
+        st.subheader("Cumulative Returns")
+        history_copy = history.copy()
+        history_copy['cumulative_return'] = (history_copy['total_value'] / results['initial_capital'] - 1) * 100
 
-    fig.add_trace(
-        go.Scatter(
-            x=history['date'],
-            y=history['cumulative_return'],
-            name='Cumulative Return',
+        fig4 = go.Figure()
+        fig4.add_trace(go.Scatter(
+            x=history_copy['date'],
+            y=history_copy['cumulative_return'],
             line=dict(color='green', width=2),
             hovertemplate='%{x}<br>Return: %{y:.2f}%<extra></extra>'
-        ),
-        row=2, col=2
-    )
+        ))
+        fig4.update_layout(xaxis_title="Date", yaxis_title="Cumulative Return (%)", height=400)
+        st.plotly_chart(fig4, use_container_width=True)
 
-    # 5. Number of open positions
-    fig.add_trace(
-        go.Scatter(
+    # Positions and Trades
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Number of Open Positions")
+        fig5 = go.Figure()
+        fig5.add_trace(go.Scatter(
             x=history['date'],
             y=history['num_positions'],
-            name='Open Positions',
             line=dict(color='purple', width=2),
-            mode='lines',
             hovertemplate='%{x}<br>Positions: %{y}<extra></extra>'
-        ),
-        row=3, col=1
-    )
+        ))
+        fig5.update_layout(xaxis_title="Date", yaxis_title="Number of Positions", height=400)
+        st.plotly_chart(fig5, use_container_width=True)
 
-    # 6. Trade P&L distribution
-    if not trades.empty:
-        fig.add_trace(
-            go.Histogram(
+    with col2:
+        st.subheader("Trade P&L Distribution")
+        if not trades.empty:
+            fig6 = go.Figure()
+            fig6.add_trace(go.Histogram(
                 x=trades['pnl'],
-                name='Trade P&L',
                 nbinsx=30,
                 marker_color='lightgreen',
                 hovertemplate='P&L: $%{x:.2f}<br>Count: %{y}<extra></extra>'
-            ),
-            row=3, col=2
-        )
+            ))
+            fig6.update_layout(xaxis_title="Trade P&L ($)", yaxis_title="Frequency", height=400)
+            st.plotly_chart(fig6, use_container_width=True)
 
-        # 7. Win/Loss ratio over time
-        trades_sorted = trades.sort_values('exit_date')
-        trades_sorted['cumulative_wins'] = (trades_sorted['pnl'] > 0).cumsum()
-        trades_sorted['cumulative_losses'] = (trades_sorted['pnl'] < 0).cumsum()
-        trades_sorted['win_loss_ratio'] = trades_sorted['cumulative_wins'] / (trades_sorted['cumulative_losses'] + 1)
+    # Win/Loss Ratio and Monthly Returns
+    col1, col2 = st.columns(2)
 
-        fig.add_trace(
-            go.Scatter(
+    with col1:
+        st.subheader("Win/Loss Ratio Over Time")
+        if not trades.empty:
+            trades_sorted = trades.sort_values('exit_date')
+            trades_sorted['cumulative_wins'] = (trades_sorted['pnl'] > 0).cumsum()
+            trades_sorted['cumulative_losses'] = (trades_sorted['pnl'] < 0).cumsum()
+            trades_sorted['win_loss_ratio'] = trades_sorted['cumulative_wins'] / (trades_sorted['cumulative_losses'] + 1)
+
+            fig7 = go.Figure()
+            fig7.add_trace(go.Scatter(
                 x=trades_sorted['exit_date'],
                 y=trades_sorted['win_loss_ratio'],
-                name='Win/Loss Ratio',
                 line=dict(color='orange', width=2),
                 hovertemplate='%{x}<br>W/L Ratio: %{y:.2f}<extra></extra>'
-            ),
-            row=4, col=1
-        )
+            ))
+            fig7.update_layout(xaxis_title="Date", yaxis_title="Win/Loss Ratio", height=400)
+            st.plotly_chart(fig7, use_container_width=True)
 
-        # 8. Monthly returns heatmap
+    with col2:
+        st.subheader("Monthly Returns Heatmap")
         if not history.empty and 'date' in history.columns:
-            history['year'] = history['date'].dt.year
-            history['month'] = history['date'].dt.month
+            history_copy = history.copy()
+            history_copy['year'] = history_copy['date'].dt.year
+            history_copy['month'] = history_copy['date'].dt.month
 
-            # Calculate monthly returns
             monthly_returns = []
-            for year in history['year'].unique():
-                year_data = history[history['year'] == year]
+            for year in history_copy['year'].unique():
+                year_data = history_copy[history_copy['year'] == year]
                 for month in range(1, 13):
                     month_data = year_data[year_data['month'] == month]
                     if not month_data.empty:
@@ -181,76 +227,44 @@ def plot_backtest_results(results: Dict, output_file: Optional[str] = None) -> g
             if monthly_returns:
                 monthly_df = pd.DataFrame(monthly_returns)
                 pivot = monthly_df.pivot(index='year', columns='month', values='return')
-
                 month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                              'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
-                fig.add_trace(
-                    go.Heatmap(
-                        z=pivot.values,
-                        x=month_names,
-                        y=pivot.index,
-                        colorscale='RdYlGn',
-                        zmid=0,
-                        hovertemplate='%{y} %{x}<br>Return: %{z:.2f}%<extra></extra>',
-                        colorbar=dict(title="Return %")
-                    ),
-                    row=4, col=2
-                )
+                fig8 = go.Figure()
+                fig8.add_trace(go.Heatmap(
+                    z=pivot.values,
+                    x=month_names,
+                    y=pivot.index,
+                    colorscale='RdYlGn',
+                    zmid=0,
+                    hovertemplate='%{y} %{x}<br>Return: %{z:.2f}%<extra></extra>',
+                    colorbar=dict(title="Return %")
+                ))
+                fig8.update_layout(xaxis_title="Month", yaxis_title="Year", height=400)
+                st.plotly_chart(fig8, use_container_width=True)
 
-    # Update layout
-    fig.update_layout(
-        height=1400,
-        showlegend=False,
-        title_text=f"Backtest Results: {results['strategy_name']}",
-        title_font_size=20
-    )
-
-    # Update axes labels
-    fig.update_xaxes(title_text="Date", row=1, col=1)
-    fig.update_yaxes(title_text="Portfolio Value ($)", row=1, col=1)
-
-    fig.update_xaxes(title_text="Date", row=1, col=2)
-    fig.update_yaxes(title_text="Drawdown (%)", row=1, col=2)
-
-    fig.update_xaxes(title_text="Daily Return (%)", row=2, col=1)
-    fig.update_yaxes(title_text="Frequency", row=2, col=1)
-
-    fig.update_xaxes(title_text="Date", row=2, col=2)
-    fig.update_yaxes(title_text="Cumulative Return (%)", row=2, col=2)
-
-    fig.update_xaxes(title_text="Date", row=3, col=1)
-    fig.update_yaxes(title_text="Number of Positions", row=3, col=1)
-
-    fig.update_xaxes(title_text="Trade P&L ($)", row=3, col=2)
-    fig.update_yaxes(title_text="Frequency", row=3, col=2)
-
-    fig.update_xaxes(title_text="Date", row=4, col=1)
-    fig.update_yaxes(title_text="Win/Loss Ratio", row=4, col=1)
-
-    fig.update_xaxes(title_text="Month", row=4, col=2)
-    fig.update_yaxes(title_text="Year", row=4, col=2)
-
-    # Save to file if specified
-    if output_file:
-        fig.write_html(output_file)
-
-    return fig
+    # Trades table
+    st.divider()
+    st.subheader("Trade History")
+    if not trades.empty:
+        st.dataframe(
+            trades[['trade_id', 'market_id', 'side', 'entry_date', 'exit_date',
+                   'entry_price', 'exit_price', 'quantity', 'pnl']].sort_values('exit_date', ascending=False),
+            use_container_width=True
+        )
 
 
-def plot_equity_curve(history: pd.DataFrame, initial_capital: float) -> go.Figure:
+def plot_equity_curve_streamlit(history: pd.DataFrame, initial_capital: float) -> None:
     """
-    Plot simple equity curve.
+    Plot simple equity curve in Streamlit.
 
     Args:
         history: Portfolio history DataFrame
         initial_capital: Initial capital
-
-    Returns:
-        Plotly figure
     """
-    fig = go.Figure()
+    st.subheader("Portfolio Equity Curve")
 
+    fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=history['date'],
         y=history['total_value'],
@@ -267,30 +281,27 @@ def plot_equity_curve(history: pd.DataFrame, initial_capital: float) -> go.Figur
     )
 
     fig.update_layout(
-        title="Portfolio Equity Curve",
         xaxis_title="Date",
         yaxis_title="Portfolio Value ($)",
-        hovermode='x unified'
+        hovermode='x unified',
+        height=500
     )
 
-    return fig
+    st.plotly_chart(fig, use_container_width=True)
 
 
-def plot_trades_timeline(trades: pd.DataFrame) -> go.Figure:
+def plot_trades_timeline_streamlit(trades: pd.DataFrame) -> None:
     """
-    Plot trades on a timeline.
+    Plot trades on a timeline in Streamlit.
 
     Args:
         trades: Trades DataFrame
-
-    Returns:
-        Plotly figure
     """
     if trades.empty:
-        return go.Figure()
+        st.warning("No trades to display")
+        return
 
-    # Color by P&L
-    colors = ['green' if pnl > 0 else 'red' for pnl in trades['pnl']]
+    st.subheader("Trades Timeline")
 
     fig = go.Figure()
 
@@ -312,11 +323,100 @@ def plot_trades_timeline(trades: pd.DataFrame) -> go.Figure:
         ))
 
     fig.update_layout(
-        title="Trades Timeline",
         xaxis_title="Date",
         yaxis_title="Price",
         showlegend=False,
-        hovermode='closest'
+        hovermode='closest',
+        height=500
     )
 
-    return fig
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def main():
+    """
+    Main Streamlit app function.
+    Run with: streamlit run backtest/visualization.py
+    """
+    st.set_page_config(
+        page_title="Backtest Results Dashboard",
+        page_icon="📈",
+        layout="wide"
+    )
+
+    st.sidebar.title("Backtest Dashboard")
+    st.sidebar.info("Upload backtest results or use sample data")
+
+    # Option to upload results file
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload backtest results (pickle or JSON)",
+        type=['pkl', 'pickle', 'json']
+    )
+
+    if uploaded_file is not None:
+        import pickle
+        import json
+
+        try:
+            if uploaded_file.name.endswith('.json'):
+                results = json.load(uploaded_file)
+                # Convert date strings to datetime if needed
+                if 'history' in results:
+                    results['history'] = pd.DataFrame(results['history'])
+                    if 'date' in results['history'].columns:
+                        results['history']['date'] = pd.to_datetime(results['history']['date'])
+                if 'trades' in results:
+                    results['trades'] = pd.DataFrame(results['trades'])
+                    if 'entry_date' in results['trades'].columns:
+                        results['trades']['entry_date'] = pd.to_datetime(results['trades']['entry_date'])
+                        results['trades']['exit_date'] = pd.to_datetime(results['trades']['exit_date'])
+            else:
+                results = pickle.load(uploaded_file)
+
+            # Create tabs for different views
+            tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "📈 Equity Curve", "🔄 Trades Timeline"])
+
+            with tab1:
+                create_backtest_dashboard(results)
+
+            with tab2:
+                plot_equity_curve_streamlit(results['history'], results['initial_capital'])
+
+            with tab3:
+                plot_trades_timeline_streamlit(results['trades'])
+
+        except Exception as e:
+            st.error(f"Error loading file: {str(e)}")
+            st.exception(e)
+    else:
+        st.info("Please upload a backtest results file to view the dashboard")
+        st.markdown("""
+        ### How to use:
+        1. Run a backtest using the backtest engine
+        2. Save the results to a pickle or JSON file
+        3. Upload the file using the sidebar
+        4. View your interactive dashboard!
+
+        ### Example:
+        ```python
+        from backtest.engine import BacktestEngine
+        import pickle
+
+        # Run backtest
+        engine = BacktestEngine(...)
+        results = engine.run()
+
+        # Save results
+        with open('results.pkl', 'wb') as f:
+            pickle.dump(results, f)
+        ```
+
+        Then run this dashboard:
+        ```bash
+        streamlit run backtest/visualization.py
+        ```
+        """)
+
+
+if __name__ == "__main__":
+    main()
