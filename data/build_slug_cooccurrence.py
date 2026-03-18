@@ -1,9 +1,44 @@
 #!/usr/bin/env python3
-import argparse
+"""
+Build slug cooccurrence tables for feature engineering.
+
+This script tokenizes text from a source table and builds:
+- timing_text_features: Per-market token counts
+- timing_text_tokens: Market-to-token mapping
+- timing_token_stats: Token document frequencies
+- timing_token_cooccurrence: Token pair cooccurrence counts
+
+Production usage: Modify CONFIG below and run directly.
+"""
 import re
 import sqlite3
 from collections import Counter
 from itertools import combinations
+
+# ============================================================================
+# CONFIGURATION - Modify these parameters for production runs
+# ============================================================================
+
+CONFIG = {
+    # Database configuration
+    'db_path': 'polymarket.db',
+
+    # Source table/view configuration
+    'source_table': 'bets_for_timing_view',  # Change this to your source table
+    'id_column': 'market_id',
+    'text_column': 'market_slug',  # Column containing text to tokenize
+
+    # Output table names (can be customized per run)
+    'output_table_prefix': 'timing',  # Will create timing_text_features, timing_text_tokens, etc.
+
+    # Processing limits
+    'limit': None,  # Set to integer to limit number of rows processed (None = all rows)
+
+    # Performance tuning
+    'batch_size': 1000,  # Batch size for inserts
+}
+
+# ============================================================================
 
 STOPWORDS = {
     # Common words
@@ -37,56 +72,93 @@ def tokenize(text: str):
     # De-duplicate within a market so cooccurrence means "appears together in a market"
     return sorted(set(toks))
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default="polymarket.db")
-    ap.add_argument("--source", required=True, help="Timing base view/table name (e.g., timing_markets_base)")
-    ap.add_argument("--id-col", default="market_id")
-    ap.add_argument("--text-col", default="text_for_tokens", help="Column containing text to tokenize")
-    ap.add_argument("--limit", type=int, default=None)
-    args = ap.parse_args()
+def main(config: dict = None):
+    """
+    Build slug cooccurrence tables.
 
-    con = sqlite3.connect(args.db)
+    Args:
+        config: Optional configuration dict. If None, uses global CONFIG.
+    """
+    if config is None:
+        config = CONFIG
+
+    # Validate configuration
+    required_keys = ['db_path', 'source_table', 'id_column', 'text_column', 'output_table_prefix']
+    for key in required_keys:
+        if key not in config:
+            raise ValueError(f"Missing required config key: {key}")
+
+    # Extract config values
+    db_path = config['db_path']
+    source_table = config['source_table']
+    id_column = config['id_column']
+    text_column = config['text_column']
+    output_prefix = config['output_table_prefix']
+    limit = config.get('limit')
+
+    # Define output table names based on prefix
+    table_features = f"{output_prefix}_text_features"
+    table_tokens = f"{output_prefix}_text_tokens"
+    table_stats = f"{output_prefix}_token_stats"
+    table_cooccurrence = f"{output_prefix}_token_cooccurrence"
+
+    print(f"[INFO] Configuration:")
+    print(f"  Database: {db_path}")
+    print(f"  Source table: {source_table}")
+    print(f"  ID column: {id_column}")
+    print(f"  Text column: {text_column}")
+    print(f"  Output prefix: {output_prefix}")
+    print(f"  Limit: {limit if limit else 'None (all rows)'}")
+    print()
+
+    # Connect to database with production-friendly settings
+    con = sqlite3.connect(db_path)
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA synchronous=NORMAL;")
     con.execute("PRAGMA temp_store=MEMORY;")
+    con.execute("PRAGMA cache_size=-64000;")  # 64MB cache
 
-    limit_sql = f" LIMIT {args.limit}" if args.limit else ""
+    # Build query
+    limit_sql = f" LIMIT {limit}" if limit else ""
     q = f"""
         SELECT
-            {args.id_col} AS market_id,
-            {args.text_col} AS text
-        FROM {args.source}
+            {id_column} AS market_id,
+            {text_column} AS text
+        FROM {source_table}
         {limit_sql}
     """
 
+    print(f"[INFO] Fetching data from {source_table}...")
     rows = con.execute(q).fetchall()
     if not rows:
-        raise RuntimeError(f"No rows returned from {args.source}. Check view/table name and column names.")
+        raise RuntimeError(f"No rows returned from {source_table}. Check table name and column names.")
+    print(f"[INFO] Fetched {len(rows)} rows")
 
-    con.executescript("""
-        DROP TABLE IF EXISTS timing_text_features;
-        DROP TABLE IF EXISTS timing_text_tokens;
-        DROP TABLE IF EXISTS timing_token_stats;
-        DROP TABLE IF EXISTS timing_token_cooccurrence;
+    # Drop and recreate tables with configurable names
+    print(f"[INFO] Creating output tables with prefix '{output_prefix}'...")
+    con.executescript(f"""
+        DROP TABLE IF EXISTS {table_features};
+        DROP TABLE IF EXISTS {table_tokens};
+        DROP TABLE IF EXISTS {table_stats};
+        DROP TABLE IF EXISTS {table_cooccurrence};
 
-        CREATE TABLE timing_text_features (
-            market_id INTEGER PRIMARY KEY,
+        CREATE TABLE {table_features} (
+            market_id TEXT PRIMARY KEY,
             raw_text TEXT,
             token_count INTEGER
         );
 
-        CREATE TABLE timing_text_tokens (
-            market_id INTEGER,
+        CREATE TABLE {table_tokens} (
+            market_id TEXT,
             token TEXT
         );
 
-        CREATE TABLE timing_token_stats (
+        CREATE TABLE {table_stats} (
             token TEXT PRIMARY KEY,
             df INTEGER
         );
 
-        CREATE TABLE timing_token_cooccurrence (
+        CREATE TABLE {table_cooccurrence} (
             token1 TEXT,
             token2 TEXT,
             co_df INTEGER,
@@ -94,10 +166,19 @@ def main():
         );
     """)
 
+    # Process rows and build counters
+    print(f"[INFO] Tokenizing and building cooccurrence matrix...")
     token_df = Counter()
     pair_df = Counter()
 
-    for market_id, text in rows:
+    batch_size = config.get('batch_size', 1000)
+    feature_batch = []
+    token_batch = []
+
+    for idx, (market_id, text) in enumerate(rows, 1):
+        if idx % 10000 == 0:
+            print(f"[INFO] Processed {idx}/{len(rows)} rows...")
+
         text = "" if text is None else str(text)
         tokens = tokenize(text)
 
@@ -105,51 +186,115 @@ def main():
         for a, b in combinations(tokens, 2):
             pair_df[(a, b)] += 1
 
-        con.execute(
-            "INSERT INTO timing_text_features (market_id, raw_text, token_count) VALUES (?,?,?)",
-            (market_id, text, len(tokens))
-        )
+        feature_batch.append((market_id, text, len(tokens)))
+        token_batch.extend([(market_id, t) for t in tokens])
 
+        # Batch insert for performance
+        if len(feature_batch) >= batch_size:
+            con.executemany(
+                f"INSERT INTO {table_features} (market_id, raw_text, token_count) VALUES (?,?,?)",
+                feature_batch
+            )
+            con.executemany(
+                f"INSERT INTO {table_tokens} (market_id, token) VALUES (?,?)",
+                token_batch
+            )
+            con.commit()
+            feature_batch = []
+            token_batch = []
+
+    # Insert remaining batches
+    if feature_batch:
         con.executemany(
-            "INSERT INTO timing_text_tokens (market_id, token) VALUES (?,?)",
-            [(market_id, t) for t in tokens]
+            f"INSERT INTO {table_features} (market_id, raw_text, token_count) VALUES (?,?,?)",
+            feature_batch
+        )
+    if token_batch:
+        con.executemany(
+            f"INSERT INTO {table_tokens} (market_id, token) VALUES (?,?)",
+            token_batch
         )
 
+    print(f"[INFO] Inserting token statistics...")
     con.executemany(
-        "INSERT INTO timing_token_stats (token, df) VALUES (?,?)",
+        f"INSERT INTO {table_stats} (token, df) VALUES (?,?)",
         list(token_df.items())
     )
 
+    print(f"[INFO] Inserting cooccurrence pairs...")
     con.executemany(
-        "INSERT INTO timing_token_cooccurrence (token1, token2, co_df) VALUES (?,?,?)",
+        f"INSERT INTO {table_cooccurrence} (token1, token2, co_df) VALUES (?,?,?)",
         [(a, b, c) for (a, b), c in pair_df.items()]
     )
 
-    con.executescript("""
-        CREATE INDEX IF NOT EXISTS idx_timing_text_tokens_market ON timing_text_tokens(market_id);
-        CREATE INDEX IF NOT EXISTS idx_timing_text_tokens_token ON timing_text_tokens(token);
-        CREATE INDEX IF NOT EXISTS idx_timing_token_cooccur_token1 ON timing_token_cooccurrence(token1);
-        CREATE INDEX IF NOT EXISTS idx_timing_token_cooccur_token2 ON timing_token_cooccurrence(token2);
+    print(f"[INFO] Creating indexes...")
+    con.executescript(f"""
+        CREATE INDEX IF NOT EXISTS idx_{output_prefix}_text_tokens_market ON {table_tokens}(market_id);
+        CREATE INDEX IF NOT EXISTS idx_{output_prefix}_text_tokens_token ON {table_tokens}(token);
+        CREATE INDEX IF NOT EXISTS idx_{output_prefix}_token_cooccur_token1 ON {table_cooccurrence}(token1);
+        CREATE INDEX IF NOT EXISTS idx_{output_prefix}_token_cooccur_token2 ON {table_cooccurrence}(token2);
     """)
 
     con.commit()
 
-    n_markets = con.execute("SELECT COUNT(*) FROM timing_text_features").fetchone()[0]
-    n_tokens = con.execute("SELECT COUNT(*) FROM timing_token_stats").fetchone()[0]
-    n_pairs = con.execute("SELECT COUNT(*) FROM timing_token_cooccurrence").fetchone()[0]
-    print(f"[OK] built text features for {n_markets} markets")
-    print(f"[OK] unique tokens: {n_tokens}")
-    print(f"[OK] unique cooccurring pairs: {n_pairs}")
+    # Summary statistics
+    n_markets = con.execute(f"SELECT COUNT(*) FROM {table_features}").fetchone()[0]
+    n_tokens = con.execute(f"SELECT COUNT(*) FROM {table_stats}").fetchone()[0]
+    n_pairs = con.execute(f"SELECT COUNT(*) FROM {table_cooccurrence}").fetchone()[0]
 
-    print("\nTop tokens by df:")
-    for token, df in con.execute("SELECT token, df FROM timing_token_stats ORDER BY df DESC LIMIT 20"):
-        print(f"  {token:20s} {df}")
+    print()
+    print("="*70)
+    print("[SUCCESS] Slug cooccurrence tables built successfully")
+    print("="*70)
+    print(f"  Markets processed: {n_markets}")
+    print(f"  Unique tokens: {n_tokens}")
+    print(f"  Cooccurring pairs: {n_pairs}")
+    print()
+    print(f"  Output tables created:")
+    print(f"    - {table_features}")
+    print(f"    - {table_tokens}")
+    print(f"    - {table_stats}")
+    print(f"    - {table_cooccurrence}")
+    print()
 
-    print("\nTop token pairs by co_df:")
-    for t1, t2, co_df in con.execute("SELECT token1, token2, co_df FROM timing_token_cooccurrence ORDER BY co_df DESC LIMIT 20"):
-        print(f"  ({t1}, {t2}) {co_df}")
+    print("Top 20 tokens by document frequency:")
+    for token, df in con.execute(f"SELECT token, df FROM {table_stats} ORDER BY df DESC LIMIT 20"):
+        print(f"  {token:20s} {df:6d}")
+
+    print()
+    print("Top 20 token pairs by cooccurrence:")
+    for t1, t2, co_df in con.execute(f"SELECT token1, token2, co_df FROM {table_cooccurrence} ORDER BY co_df DESC LIMIT 20"):
+        print(f"  ({t1:15s}, {t2:15s}) {co_df:6d}")
 
     con.close()
+    print()
+    print("[DONE]")
+
+def run_with_custom_config(**kwargs):
+    """
+    Run with custom configuration parameters.
+
+    Allows programmatic usage with overrides:
+        run_with_custom_config(
+            source_table='my_custom_table',
+            output_table_prefix='custom_prefix',
+            limit=1000
+        )
+
+    Args:
+        **kwargs: Configuration parameters to override from CONFIG
+    """
+    custom_config = CONFIG.copy()
+    custom_config.update(kwargs)
+    main(custom_config)
+
 
 if __name__ == "__main__":
+    # Production usage: modify CONFIG at the top of this file and run directly
+    # python data/build_slug_cooccurrence.py
+
+    # Or import and call programmatically:
+    # from data.build_slug_cooccurrence import run_with_custom_config
+    # run_with_custom_config(source_table='my_table', output_table_prefix='my_prefix')
+
     main()
