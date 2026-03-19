@@ -10,3 +10,4 @@ data/downloaders/__pycache__/get_all_events.cpython-312.pyc
 backtest/strategies/__pycache__/*
 .clinerules
 models/time_discounting_model/__pycache__/model.cpython-312.pyc
+model_output/*

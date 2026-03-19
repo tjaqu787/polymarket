@@ -350,9 +350,10 @@ class PolymarketDataLoader:
         Returns:
             DataFrame with additional columns: time_to_expiration, implied_rate
         """
-        # Merge to get resolution dates
+        # Merge to get resolution dates and other market metadata
+        # Don't include market_id in the merge since price_df already has it
         df = price_df.merge(
-            market_df[['token_id', 'resolution_date', 'event_slug', 'event_title', 'question']],
+            market_df[['token_id', 'resolution_date', 'event_slug', 'event_title', 'question', 'category', 'volume_num', 'liquidity_num']],
             on='token_id',
             how='left'
         )
