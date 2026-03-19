@@ -290,11 +290,4 @@ def run_with_custom_config(**kwargs):
 
 
 if __name__ == "__main__":
-    # Production usage: modify CONFIG at the top of this file and run directly
-    # python data/build_slug_cooccurrence.py
-
-    # Or import and call programmatically:
-    # from data.build_slug_cooccurrence import run_with_custom_config
-    # run_with_custom_config(source_table='my_table', output_table_prefix='my_prefix')
-
     main()
