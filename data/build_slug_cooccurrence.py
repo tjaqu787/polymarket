@@ -24,9 +24,9 @@ CONFIG = {
     'db_path': 'polymarket.db',
 
     # Source table/view configuration
-    'source_table': 'bets_for_timing_view',  # Change this to your source table
+    'source_table': 'timing_markets_base',  # Change this to your source table
     'id_column': 'market_id',
-    'text_column': 'market_slug',  # Column containing text to tokenize
+    'text_column': 'text_for_tokens',  # Column containing text to tokenize
 
     # Output table names (can be customized per run)
     'output_table_prefix': 'timing',  # Will create timing_text_features, timing_text_tokens, etc.
