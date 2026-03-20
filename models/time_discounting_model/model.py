@@ -8,14 +8,15 @@ Model Structure (see mermaid diagram below):
 - Hierarchical priors by category (politics, crypto, sports, etc.)
 - Volume-based concentration parameters
 - Term structure, implied rates, and discount function signals
+- Slug-based cooccurrence features (token counts, document frequencies, cooccurrence patterns)
 - Beta-binomial likelihood for resolved events
 
-TODO: ADD SLUG-BASED FEATURES
-Coworker is currently parsing slugs for additional labels/factors.
-These should be integrated as additional covariates in the model:
-- Extract temporal features from slugs (month names, quarters, etc.)
-- Category/domain features from event slugs
-- Add these as predictors in the event-level mean (μ_event)
+SLUG-BASED FEATURES INTEGRATED:
+- Token count (number of unique tokens in market slug/question)
+- Average token document frequency (how common are the tokens across all markets)
+- Max cooccurrence (strength of token pair relationships)
+- Token diversity (ratio of unique to total tokens)
+These are loaded from timing_text_features and timing_token_cooccurrence tables.
 """
 
 import pymc as pm
@@ -118,38 +119,38 @@ class TimeDiscountingModel:
             Dictionary of prepared data arrays for modeling
         """
         # Filter to resolved events only for training
+        # Use event_id from rates_df, market_group from resolved_df
         resolved_event_ids = resolved_df['market_group'].unique()
-        df = rates_df[rates_df['market_group'].isin(resolved_event_ids)].copy()
+        event_col = 'event_id' if 'event_id' in rates_df.columns else 'market_group'
+        df = rates_df[rates_df[event_col].isin(resolved_event_ids)].copy()
 
         # Get the latest price observation for each market
         # (or you could aggregate over a time window)
-        latest_prices = df.sort_values('date').groupby(['market_group', 'token_id']).last().reset_index()
+        group_col = 'event_id' if 'event_id' in df.columns else 'market_group'
+        latest_prices = df.sort_values('date').groupby([group_col, 'token_id']).last().reset_index()
 
         # Merge with resolved outcomes
+        # Merge on market_id (resolved_df has market-level outcomes, not token-level)
         latest_prices = latest_prices.merge(
-            resolved_df[['market_group', 'token_id', 'resolved_outcome']],
-            on=['market_group', 'token_id'],
+            resolved_df[['market_id', 'resolved_outcome']],
+            on='market_id',
             how='left'
         )
 
         # Create binary outcome: did this option win?
-        latest_prices['won'] = (latest_prices['outcome'] == latest_prices['resolved_outcome']).astype(int)
-
-        # TODO: INTEGRATE SLUG FEATURES HERE
-        # When slug parsing is complete, add features like:
-        # - temporal_category (from slug parsing: 'Q1', 'January', '2025', etc.)
-        # - market_type (from slug parsing)
-        # These should be added to latest_prices DataFrame
+        # Handle outcome_x/outcome_y from merges
+        outcome_col = 'outcome' if 'outcome' in latest_prices.columns else ('outcome_x' if 'outcome_x' in latest_prices.columns else 'outcome_y')
+        latest_prices['won'] = (latest_prices[outcome_col] == latest_prices['resolved_outcome']).astype(int)
 
         # Encode categories
         self.categories = latest_prices['category'].unique()
         category_map = {cat: i for i, cat in enumerate(self.categories)}
         latest_prices['category_idx'] = latest_prices['category'].map(category_map)
 
-        # Encode events
-        event_ids = latest_prices['market_group'].unique()
-        event_map = {eid: i for i, eid in enumerate(event_ids)}
-        latest_prices['event_idx'] = latest_prices['market_group'].map(event_map)
+        # Encode events - use the group column (event_id or market_group)
+        event_ids_col = latest_prices[group_col].unique()
+        event_map = {eid: i for i, eid in enumerate(event_ids_col)}
+        latest_prices['event_idx'] = latest_prices[group_col].map(event_map)
 
         # Fill NaNs in features with reasonable defaults
         latest_prices['ts_level'] = latest_prices['ts_level'].fillna(0)
@@ -158,17 +159,41 @@ class TimeDiscountingModel:
         latest_prices['implied_rate'] = latest_prices['implied_rate'].fillna(0)
         latest_prices['volume_num'] = latest_prices['volume_num'].fillna(0)
 
+        # Fill NaNs in cooccurrence features
+        latest_prices['token_count'] = latest_prices['token_count'].fillna(0)
+        latest_prices['avg_token_df'] = latest_prices['avg_token_df'].fillna(0)
+        latest_prices['max_token_df'] = latest_prices['max_token_df'].fillna(0)
+        latest_prices['token_diversity'] = latest_prices['token_diversity'].fillna(0)
+        latest_prices['num_pairs'] = latest_prices['num_pairs'].fillna(0)
+        latest_prices['avg_cooccurrence'] = latest_prices['avg_cooccurrence'].fillna(0)
+        latest_prices['max_cooccurrence'] = latest_prices['max_cooccurrence'].fillna(0)
+
         # Normalize volume for stability
         volume_normalized = np.log1p(latest_prices['volume_num'])
         volume_normalized = (volume_normalized - volume_normalized.mean()) / (volume_normalized.std() + 1e-6)
 
+        # Normalize cooccurrence features
+        token_count_norm = np.log1p(latest_prices['token_count'])
+        token_count_norm = (token_count_norm - token_count_norm.mean()) / (token_count_norm.std() + 1e-6)
+
+        avg_token_df_norm = np.log1p(latest_prices['avg_token_df'])
+        avg_token_df_norm = (avg_token_df_norm - avg_token_df_norm.mean()) / (avg_token_df_norm.std() + 1e-6)
+
+        max_cooccurrence_norm = np.log1p(latest_prices['max_cooccurrence'])
+        max_cooccurrence_norm = (max_cooccurrence_norm - max_cooccurrence_norm.mean()) / (max_cooccurrence_norm.std() + 1e-6)
+
+        # Clip prices to be strictly in (0, 1) for Beta distribution
+        # Beta distribution requires values strictly between 0 and 1
+        epsilon = 1e-6
+        prices_clipped = np.clip(latest_prices['price'].values, epsilon, 1 - epsilon)
+
         return {
-            'prices': latest_prices['price'].values,
+            'prices': prices_clipped,
             'won': latest_prices['won'].values,
             'category_idx': latest_prices['category_idx'].values,
             'event_idx': latest_prices['event_idx'].values,
             'n_categories': len(self.categories),
-            'n_events': len(event_ids),
+            'n_events': len(event_ids_col),
             'n_obs': len(latest_prices),
             # Signals
             'ts_level': latest_prices['ts_level'].values,
@@ -177,8 +202,13 @@ class TimeDiscountingModel:
             'implied_rate': latest_prices['implied_rate'].values,
             'volume_normalized': volume_normalized.values,
             'time_to_expiration': latest_prices['time_to_expiration'].fillna(0).values,
+            # Cooccurrence features (SLUG-BASED)
+            'token_count_norm': token_count_norm.values,
+            'avg_token_df_norm': avg_token_df_norm.values,
+            'max_cooccurrence_norm': max_cooccurrence_norm.values,
+            'token_diversity': latest_prices['token_diversity'].values,
             # For predictions
-            'event_groups': latest_prices['market_group'].values,
+            'event_groups': latest_prices[group_col].values,
             'questions': latest_prices['question'].values
         }
 
@@ -228,10 +258,11 @@ class TimeDiscountingModel:
             # For exponential: D(t) = exp(-k*t)
             β_discount = pm.HalfNormal('β_discount', sigma=1)
 
-            # TODO: ADD SLUG-BASED FEATURE COEFFICIENTS HERE
-            # When slug features are ready, add:
-            # β_temporal_category = pm.Normal('β_temporal_category', mu=0, sigma=1)
-            # β_market_type = pm.Normal('β_market_type', mu=0, sigma=1)
+            # SLUG-BASED COOCCURRENCE FEATURE COEFFICIENTS
+            β_token_count = pm.Normal('β_token_count', mu=0, sigma=1)
+            β_avg_token_df = pm.Normal('β_avg_token_df', mu=0, sigma=1)
+            β_max_cooccurrence = pm.Normal('β_max_cooccurrence', mu=0, sigma=1)
+            β_token_diversity = pm.Normal('β_token_diversity', mu=0, sigma=1)
 
             # ========================================
             # VOLUME-BASED CONCENTRATION
@@ -240,7 +271,9 @@ class TimeDiscountingModel:
             # Higher volume -> higher κ -> more concentrated around the mean
             κ_base = pm.Deterministic('κ_base',
                                       α_vol + β_vol * data['volume_normalized'])
-            κ = pm.math.exp(κ_base)  # Ensure positive
+            # Clip κ_base to prevent overflow, then exp to ensure positive
+            # Keep κ in reasonable range [1, 100] to avoid numerical issues
+            κ = pm.math.clip(pm.math.exp(κ_base), 1.0, 100.0)
 
             # ========================================
             # EVENT-LEVEL PARAMETERS
@@ -260,26 +293,32 @@ class TimeDiscountingModel:
                 discount = pm.math.exp(-β_discount * data['time_to_expiration'])
 
             # Combine all signals into observation mean
-            μ_obs = pm.Deterministic('μ_obs',
-                pm.math.invlogit(  # Map to [0, 1]
-                    μ_event +
-                    β_ts_level * data['ts_level'] +
-                    β_ts_slope * data['ts_slope'] +
-                    β_ts_curvature * data['ts_curvature'] +
-                    β_implied_rate * data['implied_rate'] +
-                    # TODO: ADD SLUG FEATURES HERE
-                    # β_temporal_category * data['temporal_category'] +
-                    pm.math.log(discount + 1e-6)  # Discount effect
-                )
+            # Clip to keep away from extreme values that cause numerical issues
+            μ_obs_raw = pm.math.invlogit(  # Map to [0, 1]
+                μ_event +
+                β_ts_level * data['ts_level'] +
+                β_ts_slope * data['ts_slope'] +
+                β_ts_curvature * data['ts_curvature'] +
+                β_implied_rate * data['implied_rate'] +
+                # SLUG-BASED COOCCURRENCE FEATURES
+                β_token_count * data['token_count_norm'] +
+                β_avg_token_df * data['avg_token_df_norm'] +
+                β_max_cooccurrence * data['max_cooccurrence_norm'] +
+                β_token_diversity * data['token_diversity'] +
+                pm.math.log(discount + 1e-6)  # Discount effect
             )
+            # Ensure μ_obs is strictly in (0, 1) for Beta distribution stability
+            μ_obs = pm.Deterministic('μ_obs',
+                                     pm.math.clip(μ_obs_raw, 1e-6, 1 - 1e-6))
 
             # ========================================
             # LIKELIHOOD
             # ========================================
             # Beta-binomial for observed prices and outcomes
             # α and β parameters for Beta distribution
-            α_beta = μ_obs * κ
-            β_beta = (1 - μ_obs) * κ
+            # Ensure parameters are valid (> 0) and not too extreme
+            α_beta = pm.math.maximum(μ_obs * κ, 0.1)  # Ensure α > 0
+            β_beta = pm.math.maximum((1 - μ_obs) * κ, 0.1)  # Ensure β > 0
 
             # For resolved events, use actual outcomes
             # Model price as coming from Beta, outcome as Binomial sample
