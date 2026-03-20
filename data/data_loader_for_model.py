@@ -227,6 +227,116 @@ class PolymarketDataLoader:
 
         return df
 
+    def get_token_features(self, market_ids: Optional[List[str]] = None) -> pd.DataFrame:
+        """
+        Load text token features from timing_text_tokens and timing_token_stats tables.
+
+        Args:
+            market_ids: Optional list of market IDs to filter
+
+        Returns:
+            DataFrame with market_id and aggregated token features:
+            - token_count: number of unique tokens
+            - avg_token_df: average document frequency of tokens
+            - max_token_df: max document frequency
+            - token_diversity: ratio of unique tokens to total tokens
+        """
+        conn = sqlite3.connect(self.db_path)
+
+        # Check if tables exist
+        tables_check = conn.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name IN ('timing_text_features', 'timing_text_tokens', 'timing_token_stats')
+        """).fetchall()
+
+        if len(tables_check) < 3:
+            print("Warning: Token feature tables not found. Run build_slug_cooccurrence.py first.")
+            return pd.DataFrame()
+
+        query = """
+            SELECT
+                tf.market_id,
+                tf.token_count,
+                AVG(ts.df) as avg_token_df,
+                MAX(ts.df) as max_token_df,
+                MIN(ts.df) as min_token_df
+            FROM timing_text_features tf
+            LEFT JOIN timing_text_tokens tt ON tf.market_id = tt.market_id
+            LEFT JOIN timing_token_stats ts ON tt.token = ts.token
+        """
+
+        conditions = []
+        if market_ids:
+            market_list = "', '".join(market_ids)
+            conditions.append(f"tf.market_id IN ('{market_list}')")
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
+        query += " GROUP BY tf.market_id, tf.token_count"
+
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+
+        # Calculate token diversity
+        if not df.empty:
+            df['token_diversity'] = df['token_count'] / (df['token_count'] + 1)  # Avoid division by zero
+
+        return df
+
+    def get_cooccurrence_features(self, market_ids: Optional[List[str]] = None, top_k: int = 50) -> pd.DataFrame:
+        """
+        Load token cooccurrence features for markets.
+
+        Args:
+            market_ids: Optional list of market IDs to filter
+            top_k: Number of top cooccurring pairs to consider
+
+        Returns:
+            DataFrame with market_id and cooccurrence features:
+            - max_cooccurrence: max cooccurrence count for any token pair in this market
+            - avg_cooccurrence: average cooccurrence count
+            - num_pairs: number of cooccurring token pairs
+        """
+        conn = sqlite3.connect(self.db_path)
+
+        # Check if tables exist
+        tables_check = conn.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='timing_token_cooccurrence'
+        """).fetchall()
+
+        if len(tables_check) == 0:
+            print("Warning: Cooccurrence tables not found. Run build_slug_cooccurrence.py first.")
+            return pd.DataFrame()
+
+        query = """
+            SELECT
+                tt1.market_id,
+                COUNT(*) as num_pairs,
+                AVG(tc.co_df) as avg_cooccurrence,
+                MAX(tc.co_df) as max_cooccurrence
+            FROM timing_text_tokens tt1
+            JOIN timing_text_tokens tt2 ON tt1.market_id = tt2.market_id AND tt1.token < tt2.token
+            JOIN timing_token_cooccurrence tc ON
+                (tc.token1 = tt1.token AND tc.token2 = tt2.token)
+        """
+
+        conditions = []
+        if market_ids:
+            market_list = "', '".join(market_ids)
+            conditions.append(f"tt1.market_id IN ('{market_list}')")
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
+        query += " GROUP BY tt1.market_id"
+
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+
+        return df
+
     def calculate_implied_rates(self,
                                price_df: pd.DataFrame,
                                market_df: pd.DataFrame) -> pd.DataFrame:
@@ -240,9 +350,10 @@ class PolymarketDataLoader:
         Returns:
             DataFrame with additional columns: time_to_expiration, implied_rate
         """
-        # Merge to get resolution dates
+        # Merge to get resolution dates and other market metadata
+        # Don't include market_id in the merge since price_df already has it
         df = price_df.merge(
-            market_df[['token_id', 'resolution_date', 'event_slug', 'event_title', 'question']],
+            market_df[['token_id', 'resolution_date', 'event_slug', 'event_title', 'question', 'category', 'volume_num', 'liquidity_num']],
             on='token_id',
             how='left'
         )
@@ -381,12 +492,42 @@ class PolymarketDataLoader:
         print(f"Calculated term structure metrics for {len(ts_metrics_df)} date-event combinations")
 
         # Merge term structure metrics back into rates_df
+        # ts_metrics uses 'market_group', but rates_df has 'event_id', so we need to align
         if len(ts_metrics_df) > 0:
             rates_df = rates_df.merge(
                 ts_metrics_df,
-                on=['date', 'market_group'],
+                left_on=['date', 'event_id'],
+                right_on=['date', 'market_group'],
                 how='left'
             )
+            # Drop duplicate column
+            if 'market_group' in rates_df.columns:
+                rates_df = rates_df.drop(columns=['market_group'])
+
+        print("\nLoading text token features...")
+        market_ids = market_df['market_id'].unique().tolist()
+        token_features_df = self.get_token_features(market_ids=market_ids)
+        if len(token_features_df) > 0:
+            print(f"Loaded token features for {len(token_features_df)} markets")
+            rates_df = rates_df.merge(
+                token_features_df,
+                on='market_id',
+                how='left'
+            )
+        else:
+            print("No token features found (tables may not exist)")
+
+        print("\nLoading token cooccurrence features...")
+        cooccurrence_features_df = self.get_cooccurrence_features(market_ids=market_ids)
+        if len(cooccurrence_features_df) > 0:
+            print(f"Loaded cooccurrence features for {len(cooccurrence_features_df)} markets")
+            rates_df = rates_df.merge(
+                cooccurrence_features_df,
+                on='market_id',
+                how='left'
+            )
+        else:
+            print("No cooccurrence features found (tables may not exist)")
 
         print("\nLoading resolved outcomes...")
         resolved_df = self.get_resolved_outcomes(event_ids=event_ids)
@@ -417,9 +558,10 @@ def main():
 
         # Show sample of the data
         sample_cols = [
-            'date', 'market_group', 'outcome', 'price',
+            'date', 'event_id', 'outcome', 'price',
             'time_to_expiration', 'implied_rate',
-            'ts_level', 'ts_slope', 'ts_curvature', 'ts_num_points'
+            'ts_level', 'ts_slope', 'ts_curvature', 'ts_num_points',
+            'token_count', 'avg_token_df', 'max_cooccurrence'
         ]
         available_cols = [col for col in sample_cols if col in rates_df.columns]
         print(rates_df[available_cols].head(20))
@@ -429,8 +571,14 @@ def main():
         print("="*60)
         print(f"Total price points: {len(rates_df)}")
         print(f"Date range: {rates_df['date'].min()} to {rates_df['date'].max()}")
-        print(f"Event groups: {rates_df['market_group'].nunique()}")
+        print(f"Event groups: {rates_df['event_id'].nunique()}")
         print(f"Markets: {rates_df['market_id'].nunique()}")
+
+        print("\nCooccurrence Feature Statistics:")
+        if 'token_count' in rates_df.columns:
+            print(f"  Token count: {rates_df['token_count'].describe()}")
+        if 'max_cooccurrence' in rates_df.columns:
+            print(f"  Max cooccurrence: {rates_df['max_cooccurrence'].describe()}")
 
         print("\nImplied Rate Statistics:")
         print(rates_df['implied_rate'].describe())

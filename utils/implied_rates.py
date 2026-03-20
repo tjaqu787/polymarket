@@ -25,8 +25,12 @@ def calculate_time_to_expiration(current_date: str, resolution_date: str) -> flo
         resolution_date: ISO format date string (YYYY-MM-DD)
 
     Returns:
-        Time to expiration in years (float)
+        Time to expiration in years (float), or np.nan if resolution_date is None
     """
+    # Handle None or missing resolution dates
+    if resolution_date is None or pd.isna(resolution_date):
+        return np.nan
+
     # Parse dates
     if 'T' in current_date:
         current_dt = datetime.fromisoformat(current_date.replace('Z', '+00:00'))
