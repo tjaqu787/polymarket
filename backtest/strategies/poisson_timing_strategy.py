@@ -39,6 +39,7 @@ class PoissonTimingStrategy(Strategy):
         self.max_rmse = self.config.get('max_rmse', 0.3)  # Max fitting error
         self.distribution = self.config.get('distribution', 'gamma')  # Distribution type
         self.n_bootstrap = self.config.get('n_bootstrap', 500)  # Bootstrap samples for CI
+        self.max_event_exposure = self.config.get('max_event_exposure', 0.15)  # Max % of portfolio per event
 
         # Track events we've analyzed
         self.fitted_events = {}  # event_id -> last fit result
@@ -198,6 +199,118 @@ class PoissonTimingStrategy(Strategy):
             'median': ci['median'][idx]
         }
 
+    def _calculate_position_size(self, price: float, exposure_fraction: float) -> float:
+        """
+        Calculate position size (number of contracts) based on exposure fraction.
+
+        Args:
+            price: Entry price per contract
+            exposure_fraction: Fraction of portfolio to allocate (e.g., 0.03 for 3%)
+
+        Returns:
+            Number of contracts to buy
+        """
+        if price <= 0 or self.portfolio_value <= 0:
+            return 0.0
+
+        # Calculate target allocation in dollars
+        target_allocation = self.portfolio_value * exposure_fraction
+
+        # Calculate number of contracts
+        size = target_allocation / price
+
+        # Round down to avoid exceeding allocation
+        size = int(size)
+
+        return max(0.0, float(size))
+
+    def _calculate_event_position_sizes(
+        self,
+        potential_signals: List[Dict],
+        current_date: pd.Timestamp
+    ) -> List[Signal]:
+        """
+        Calculate position sizes for signals based on event-level exposure limits.
+
+        Args:
+            potential_signals: List of signal info dicts from first pass
+            current_date: Current date
+
+        Returns:
+            List of Signal objects with calculated sizes
+        """
+        signals = []
+
+        # Count only new position signals (BUY/SHORT) for sizing
+        new_position_signals = [
+            s for s in potential_signals
+            if s['type'] in [SignalType.BUY, SignalType.SHORT]
+        ]
+
+        num_new_positions = len(new_position_signals)
+
+        # Calculate per-market exposure
+        if num_new_positions > 0:
+            per_market_exposure = self.max_event_exposure / num_new_positions
+        else:
+            per_market_exposure = 0.0
+
+        # Generate signals with calculated sizes
+        for signal_info in potential_signals:
+            row = signal_info['row']
+            ci_bounds = signal_info['ci_bounds']
+            fit_result = signal_info['fit_result']
+            signal_type = signal_info['type']
+
+            # Calculate size based on signal type
+            if signal_type in [SignalType.BUY, SignalType.SHORT]:
+                # NEW POSITION: Calculate size based on event exposure
+                size = self._calculate_position_size(
+                    price=row['price'],
+                    exposure_fraction=per_market_exposure
+                )
+
+                reason_prefix = "Below" if signal_type == SignalType.BUY else "Above"
+                reason = (
+                    f"{reason_prefix} {int(self.ci_level*100)}% CI: "
+                    f"Price={row['price']:.3f}, "
+                    f"Lower={ci_bounds['lower']:.3f}, "
+                    f"Upper={ci_bounds['upper']:.3f}, "
+                    f"Allocation={per_market_exposure*100:.1f}%"
+                )
+            else:
+                # EXIT POSITION (SELL/COVER): Use existing position size
+                size = signal_info['position']
+
+                reason_prefix = "Exit long" if signal_type == SignalType.SELL else "Exit short"
+                bound_type = "upper" if signal_type == SignalType.SELL else "lower"
+                bound_value = ci_bounds['upper'] if signal_type == SignalType.SELL else ci_bounds['lower']
+                reason = (
+                    f"{reason_prefix} at {bound_type} bound: "
+                    f"Price={row['price']:.3f}, "
+                    f"{bound_type.capitalize()}={bound_value:.3f}"
+                )
+
+            signals.append(Signal(
+                market_id=row['market_id'],
+                token_id=row['token_id'],
+                outcome='Yes',
+                signal_type=signal_type,
+                size=size,
+                price=row['price'],
+                reason=reason,
+                metadata={
+                    'lower_bound': ci_bounds['lower'],
+                    'upper_bound': ci_bounds['upper'],
+                    'median': ci_bounds['median'],
+                    'rmse': fit_result['rmse'],
+                    'event_exposure': per_market_exposure if signal_type in [SignalType.BUY, SignalType.SHORT] else None,
+                    'num_event_positions': num_new_positions if signal_type in [SignalType.BUY, SignalType.SHORT] else None
+                }
+            ))
+
+        return signals
+
     def on_data(self, current_date: pd.Timestamp, data: pd.DataFrame) -> List[Signal]:
         """Generate trading signals based on Poisson timing model."""
         signals = []
@@ -238,7 +351,8 @@ class PoissonTimingStrategy(Strategy):
 
             fit_result = self.fitted_events[event_id]
 
-            # Generate signals for each market in this event
+            # PASS 1: Collect all markets that would trigger signals
+            potential_signals = []
             for _, row in event_data[event_data['outcome'] == 'Yes'].iterrows():
                 market_id = row['market_id']
                 market_price = row['price']
@@ -251,81 +365,52 @@ class PoissonTimingStrategy(Strategy):
 
                 lower_bound = ci_bounds['lower']
                 upper_bound = ci_bounds['upper']
-                median = ci_bounds['median']
-
                 current_position = self.get_position(market_id, 'Yes')
 
-                # BUY signal: price below lower bound (like buying a call - underpriced)
+                # Check which signal type this would trigger
+                signal_info = None
+
                 if market_price < lower_bound and current_position == 0:
-                    signals.append(Signal(
-                        market_id=market_id,
-                        token_id=row['token_id'],
-                        outcome='Yes',
-                        signal_type=SignalType.BUY,
-                        size=1.0,
-                        price=market_price,
-                        reason=f"Below {int(self.ci_level*100)}% CI: Price={market_price:.3f}, Lower={lower_bound:.3f}, Upper={upper_bound:.3f}",
-                        metadata={
-                            'lower_bound': lower_bound,
-                            'upper_bound': upper_bound,
-                            'median': median,
-                            'rmse': fit_result['rmse']
-                        }
-                    ))
-
-                # SHORT signal: price above upper bound (like selling a put - overpriced)
+                    signal_info = {
+                        'type': SignalType.BUY,
+                        'row': row,
+                        'ci_bounds': ci_bounds,
+                        'fit_result': fit_result
+                    }
                 elif market_price > upper_bound and current_position == 0:
-                    signals.append(Signal(
-                        market_id=market_id,
-                        token_id=row['token_id'],
-                        outcome='Yes',
-                        signal_type=SignalType.SHORT,
-                        size=1.0,
-                        price=market_price,
-                        reason=f"Above {int(self.ci_level*100)}% CI: Price={market_price:.3f}, Lower={lower_bound:.3f}, Upper={upper_bound:.3f}",
-                        metadata={
-                            'lower_bound': lower_bound,
-                            'upper_bound': upper_bound,
-                            'median': median,
-                            'rmse': fit_result['rmse']
-                        }
-                    ))
-
-                # SELL signal: close long position when price reaches upper bound
+                    signal_info = {
+                        'type': SignalType.SHORT,
+                        'row': row,
+                        'ci_bounds': ci_bounds,
+                        'fit_result': fit_result
+                    }
                 elif market_price >= upper_bound and current_position > 0:
-                    signals.append(Signal(
-                        market_id=market_id,
-                        token_id=row['token_id'],
-                        outcome='Yes',
-                        signal_type=SignalType.SELL,
-                        size=current_position,
-                        price=market_price,
-                        reason=f"Exit long at upper bound: Price={market_price:.3f}, Upper={upper_bound:.3f}",
-                        metadata={
-                            'lower_bound': lower_bound,
-                            'upper_bound': upper_bound,
-                            'median': median,
-                            'rmse': fit_result['rmse']
-                        }
-                    ))
-
-                # COVER signal: close short position when price reaches lower bound
+                    signal_info = {
+                        'type': SignalType.SELL,
+                        'row': row,
+                        'ci_bounds': ci_bounds,
+                        'fit_result': fit_result,
+                        'position': current_position
+                    }
                 elif market_price <= lower_bound and current_position < 0:
-                    signals.append(Signal(
-                        market_id=market_id,
-                        token_id=row['token_id'],
-                        outcome='Yes',
-                        signal_type=SignalType.COVER,
-                        size=abs(current_position),
-                        price=market_price,
-                        reason=f"Exit short at lower bound: Price={market_price:.3f}, Lower={lower_bound:.3f}",
-                        metadata={
-                            'lower_bound': lower_bound,
-                            'upper_bound': upper_bound,
-                            'median': median,
-                            'rmse': fit_result['rmse']
-                        }
-                    ))
+                    signal_info = {
+                        'type': SignalType.COVER,
+                        'row': row,
+                        'ci_bounds': ci_bounds,
+                        'fit_result': fit_result,
+                        'position': abs(current_position)
+                    }
+
+                if signal_info is not None:
+                    potential_signals.append(signal_info)
+
+            # PASS 2: Calculate sizes and generate signals
+            event_signals = self._calculate_event_position_sizes(
+                potential_signals,
+                current_date
+            )
+
+            signals.extend(event_signals)
 
         return signals
 
