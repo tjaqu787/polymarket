@@ -19,6 +19,7 @@ strategy = PoissonTimingStrategy(config={
     "distribution": "gamma",
     "refit_days": 7,
     "n_bootstrap": 500,  # Bootstrap samples for CI calculation
+    "max_event_exposure": 0.15,  # 15% of portfolio per event
 })
 
 data_loader = DataLoader(DB_PATH)

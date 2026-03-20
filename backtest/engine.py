@@ -117,8 +117,9 @@ class BacktestEngine:
             max_positions=self.max_positions
         )
 
-        # Reset strategy
+        # Reset strategy and inject portfolio reference
         self.strategy.reset()
+        self.strategy.set_portfolio(self.portfolio)
 
         # Get unique dates
         dates = sorted(self.data['date'].unique())
@@ -209,12 +210,16 @@ class BacktestEngine:
     def _execute_signals(self, signals: List[Signal], current_date: pd.Timestamp):
         """Execute trading signals."""
         for signal in signals:
-            if signal.signal_type == SignalType.BUY:
+            if signal.signal_type == SignalType.BUY or signal.signal_type == SignalType.SHORT:
                 # Calculate position size if not specified
                 if signal.size <= 0:
                     signal.size = self.portfolio.calculate_position_size(signal.price)
 
-                # Open position
+                # For SHORT, use negative size to indicate short position
+                if signal.signal_type == SignalType.SHORT:
+                    signal.size = -abs(signal.size)
+
+                # Open position (long or short)
                 success = self.portfolio.open_position(
                     market_id=signal.market_id,
                     token_id=signal.token_id,
@@ -225,10 +230,11 @@ class BacktestEngine:
                 )
 
                 if success and self.verbose:
-                    logger.debug(f"Opened position: {signal.market_id} @ {signal.price:.3f}")
+                    position_type = "short" if signal.signal_type == SignalType.SHORT else "long"
+                    logger.debug(f"Opened {position_type} position: {signal.market_id} @ {signal.price:.3f}")
 
-            elif signal.signal_type == SignalType.SELL or signal.signal_type == SignalType.CLOSE:
-                # Close position
+            elif signal.signal_type in [SignalType.SELL, SignalType.COVER, SignalType.CLOSE]:
+                # Close position (long or short)
                 trade = self.portfolio.close_position(
                     market_id=signal.market_id,
                     outcome=signal.outcome,
