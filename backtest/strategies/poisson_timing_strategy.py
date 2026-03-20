@@ -19,24 +19,26 @@ from models.poisson_timing_model import PoissonTimingModel
 
 class PoissonTimingStrategy(Strategy):
     """
-    Strategy that uses Poisson timing model to predict event timing
-    and trades time-distributed markets accordingly.
+    Calendar Call/Put Strategy using Poisson timing model credible intervals.
 
-    Strategy logic:
+    Strategy logic (like a calendar spread):
     1. Identify time-distributed events (markets with "by <date>" in question)
-    2. Fit Poisson model to current price term structure
-    3. Buy markets where predicted probability > market price (underpriced)
-    4. Sell when market price > predicted probability (overpriced)
+    2. Fit Poisson model to current price term structure with credible intervals
+    3. BUY when market price < lower bound of 70% CI (like buying calls - underpriced)
+    4. SHORT when market price > upper bound of 70% CI (like selling puts - overpriced)
+    5. SELL (close longs) when price reaches upper bound
+    6. COVER (close shorts) when price reaches lower bound
     """
 
     def __init__(self, config: Optional[Dict] = None):
         super().__init__(config)
 
         # Strategy parameters
-        self.min_edge = self.config.get('min_edge', 0.05)  # Minimum edge to trade (5%)
+        self.ci_level = self.config.get('ci_level', 0.70)  # Credible interval level (70%)
         self.min_buckets = self.config.get('min_buckets', 3)  # Min time buckets needed
         self.max_rmse = self.config.get('max_rmse', 0.3)  # Max fitting error
         self.distribution = self.config.get('distribution', 'gamma')  # Distribution type
+        self.n_bootstrap = self.config.get('n_bootstrap', 500)  # Bootstrap samples for CI
 
         # Track events we've analyzed
         self.fitted_events = {}  # event_id -> last fit result
@@ -47,7 +49,7 @@ class PoissonTimingStrategy(Strategy):
 
     @property
     def name(self) -> str:
-        return f"PoissonTiming_{self.distribution}_{self.min_edge}"
+        return f"PoissonTiming_{self.distribution}_CI{int(self.ci_level*100)}"
 
     def extract_target_date(self, question: str) -> Optional[datetime]:
         """Extract target date from question text."""
@@ -139,34 +141,41 @@ class PoissonTimingStrategy(Strategy):
             if fit_result['rmse'] > self.max_rmse:
                 return None
 
-            # Make predictions
-            pred_times = np.linspace(times.min(), times.max(), 100)
-            predictions = self.model.predict_timing(fit_result['params'], pred_times)
+            # Calculate credible intervals
+            credible_intervals = self.model.calculate_credible_intervals(
+                times,
+                cdf_values,
+                times,  # Evaluate at same time points
+                ci_level=self.ci_level,
+                n_bootstrap=self.n_bootstrap
+            )
 
             return {
                 'params': fit_result['params'],
                 'rmse': fit_result['rmse'],
                 'aic': fit_result['aic'],
-                'predictions': predictions,
+                'credible_intervals': credible_intervals,
                 'markets': df,
-                'fit_date': current_date
+                'fit_date': current_date,
+                'times': times,
+                'cdf_values': cdf_values
             }
 
         except Exception as e:
             # Fitting failed
             return None
 
-    def calculate_fair_value(
+    def calculate_credible_bounds(
         self,
         market_id: str,
         fit_result: Dict,
         current_date: pd.Timestamp
-    ) -> Optional[float]:
+    ) -> Optional[Dict]:
         """
-        Calculate fair value for a market based on fitted model.
+        Calculate credible interval bounds for a market based on fitted model.
 
         Returns:
-            Fair value (probability) or None if not found
+            Dictionary with 'lower', 'upper', 'median' or None if not found
         """
         # Find this market in the fitted markets
         markets_df = fit_result['markets']
@@ -177,13 +186,17 @@ class PoissonTimingStrategy(Strategy):
 
         target_time_years = market_row.iloc[0]['years_to_target']
 
-        # Get fitted CDF at this time point
-        fitted_cdf = self.model._calculate_fitted_cdf(
-            np.array([target_time_years]),
-            fit_result['params']
-        )[0]
+        # Find the index in the fit result times that's closest to this market's time
+        times = fit_result['times']
+        idx = np.argmin(np.abs(times - target_time_years))
 
-        return fitted_cdf
+        ci = fit_result['credible_intervals']
+
+        return {
+            'lower': ci['lower'][idx],
+            'upper': ci['upper'][idx],
+            'median': ci['median'][idx]
+        }
 
     def on_data(self, current_date: pd.Timestamp, data: pd.DataFrame) -> List[Signal]:
         """Generate trading signals based on Poisson timing model."""
@@ -230,18 +243,20 @@ class PoissonTimingStrategy(Strategy):
                 market_id = row['market_id']
                 market_price = row['price']
 
-                # Calculate fair value
-                fair_value = self.calculate_fair_value(market_id, fit_result, current_date)
+                # Calculate credible interval bounds
+                ci_bounds = self.calculate_credible_bounds(market_id, fit_result, current_date)
 
-                if fair_value is None:
+                if ci_bounds is None:
                     continue
 
-                # Calculate edge
-                edge = fair_value - market_price
+                lower_bound = ci_bounds['lower']
+                upper_bound = ci_bounds['upper']
+                median = ci_bounds['median']
+
                 current_position = self.get_position(market_id, 'Yes')
 
-                # BUY signal: underpriced (market < fair value)
-                if edge > self.min_edge and current_position == 0:
+                # BUY signal: price below lower bound (like buying a call - underpriced)
+                if market_price < lower_bound and current_position == 0:
                     signals.append(Signal(
                         market_id=market_id,
                         token_id=row['token_id'],
@@ -249,16 +264,35 @@ class PoissonTimingStrategy(Strategy):
                         signal_type=SignalType.BUY,
                         size=1.0,
                         price=market_price,
-                        reason=f"Underpriced: Fair={fair_value:.3f}, Market={market_price:.3f}, Edge={edge:.3f}",
+                        reason=f"Below {int(self.ci_level*100)}% CI: Price={market_price:.3f}, Lower={lower_bound:.3f}, Upper={upper_bound:.3f}",
                         metadata={
-                            'fair_value': fair_value,
-                            'edge': edge,
+                            'lower_bound': lower_bound,
+                            'upper_bound': upper_bound,
+                            'median': median,
                             'rmse': fit_result['rmse']
                         }
                     ))
 
-                # SELL signal: overpriced (market > fair value)
-                elif edge < -self.min_edge and current_position > 0:
+                # SHORT signal: price above upper bound (like selling a put - overpriced)
+                elif market_price > upper_bound and current_position == 0:
+                    signals.append(Signal(
+                        market_id=market_id,
+                        token_id=row['token_id'],
+                        outcome='Yes',
+                        signal_type=SignalType.SHORT,
+                        size=1.0,
+                        price=market_price,
+                        reason=f"Above {int(self.ci_level*100)}% CI: Price={market_price:.3f}, Lower={lower_bound:.3f}, Upper={upper_bound:.3f}",
+                        metadata={
+                            'lower_bound': lower_bound,
+                            'upper_bound': upper_bound,
+                            'median': median,
+                            'rmse': fit_result['rmse']
+                        }
+                    ))
+
+                # SELL signal: close long position when price reaches upper bound
+                elif market_price >= upper_bound and current_position > 0:
                     signals.append(Signal(
                         market_id=market_id,
                         token_id=row['token_id'],
@@ -266,10 +300,29 @@ class PoissonTimingStrategy(Strategy):
                         signal_type=SignalType.SELL,
                         size=current_position,
                         price=market_price,
-                        reason=f"Overpriced: Fair={fair_value:.3f}, Market={market_price:.3f}, Edge={edge:.3f}",
+                        reason=f"Exit long at upper bound: Price={market_price:.3f}, Upper={upper_bound:.3f}",
                         metadata={
-                            'fair_value': fair_value,
-                            'edge': edge,
+                            'lower_bound': lower_bound,
+                            'upper_bound': upper_bound,
+                            'median': median,
+                            'rmse': fit_result['rmse']
+                        }
+                    ))
+
+                # COVER signal: close short position when price reaches lower bound
+                elif market_price <= lower_bound and current_position < 0:
+                    signals.append(Signal(
+                        market_id=market_id,
+                        token_id=row['token_id'],
+                        outcome='Yes',
+                        signal_type=SignalType.COVER,
+                        size=abs(current_position),
+                        price=market_price,
+                        reason=f"Exit short at lower bound: Price={market_price:.3f}, Lower={lower_bound:.3f}",
+                        metadata={
+                            'lower_bound': lower_bound,
+                            'upper_bound': upper_bound,
+                            'median': median,
                             'rmse': fit_result['rmse']
                         }
                     ))

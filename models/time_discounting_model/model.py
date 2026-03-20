@@ -8,15 +8,7 @@ Model Structure (see mermaid diagram below):
 - Hierarchical priors by category (politics, crypto, sports, etc.)
 - Volume-based concentration parameters
 - Term structure, implied rates, and discount function signals
-- Slug-based cooccurrence features (token counts, document frequencies, cooccurrence patterns)
 - Beta-binomial likelihood for resolved events
-
-SLUG-BASED FEATURES INTEGRATED:
-- Token count (number of unique tokens in market slug/question)
-- Average token document frequency (how common are the tokens across all markets)
-- Max cooccurrence (strength of token pair relationships)
-- Token diversity (ratio of unique to total tokens)
-These are loaded from timing_text_features and timing_token_cooccurrence tables.
 """
 
 import pymc as pm
@@ -245,8 +237,7 @@ class TimeDiscountingModel:
             # ========================================
             # SIGNAL EFFECTS
             # ========================================
-            # Term structure effects
-            β_ts_level = pm.Normal('β_ts_level', mu=0, sigma=1)
+            # Term structure effects (slope and curvature describe curve shape)
             β_ts_slope = pm.Normal('β_ts_slope', mu=0, sigma=1)
             β_ts_curvature = pm.Normal('β_ts_curvature', mu=0, sigma=1)
 
@@ -258,11 +249,6 @@ class TimeDiscountingModel:
             # For exponential: D(t) = exp(-k*t)
             β_discount = pm.HalfNormal('β_discount', sigma=1)
 
-            # SLUG-BASED COOCCURRENCE FEATURE COEFFICIENTS
-            β_token_count = pm.Normal('β_token_count', mu=0, sigma=1)
-            β_avg_token_df = pm.Normal('β_avg_token_df', mu=0, sigma=1)
-            β_max_cooccurrence = pm.Normal('β_max_cooccurrence', mu=0, sigma=1)
-            β_token_diversity = pm.Normal('β_token_diversity', mu=0, sigma=1)
 
             # ========================================
             # VOLUME-BASED CONCENTRATION
@@ -296,15 +282,9 @@ class TimeDiscountingModel:
             # Clip to keep away from extreme values that cause numerical issues
             μ_obs_raw = pm.math.invlogit(  # Map to [0, 1]
                 μ_event +
-                β_ts_level * data['ts_level'] +
                 β_ts_slope * data['ts_slope'] +
                 β_ts_curvature * data['ts_curvature'] +
                 β_implied_rate * data['implied_rate'] +
-                # SLUG-BASED COOCCURRENCE FEATURES
-                β_token_count * data['token_count_norm'] +
-                β_avg_token_df * data['avg_token_df_norm'] +
-                β_max_cooccurrence * data['max_cooccurrence_norm'] +
-                β_token_diversity * data['token_diversity'] +
                 pm.math.log(discount + 1e-6)  # Discount effect
             )
             # Ensure μ_obs is strictly in (0, 1) for Beta distribution stability
