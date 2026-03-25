@@ -198,3 +198,108 @@ SELECT
 
 FROM picked
 GROUP BY token_id;
+
+
+-- MARCH 25 JS:
+DROP VIEW IF EXISTS timing_prices_long_bft;
+
+CREATE VIEW timing_prices_long_bft AS
+SELECT
+  b.market_id,
+  b.event_id,
+  b.question,
+  b.end_date,
+  b.market_group,
+  b.category,
+  b.event_slug,
+  b.event_title,
+  b.resolution_date,
+  b.token_id,
+  ph.ts,
+  ph.date AS price_date,
+  ph.price,
+  (julianday(b.end_date) - julianday(ph.date)) AS days_to_deadline
+FROM bets_for_timing_view b
+JOIN price_history ph
+
+----------------------------------------
+SELECT COUNT(*) AS n_rows FROM timing_prices_long_bft;
+SELECT * FROM timing_prices_long_bft LIMIT 10;
+
+----------------------------------------
+DROP TABLE IF EXISTS timing_model_input_bft;
+
+CREATE TABLE timing_model_input_bft AS
+WITH targets(label, target_days) AS (
+  VALUES ('p30', 30.0), ('p7', 7.0), ('p1', 1.0)
+),
+ranked AS (
+  SELECT
+    y.token_id,
+    y.market_id,
+    y.event_id,
+    y.event_slug,
+    y.category,
+    y.question,
+    y.end_date,
+    y.price_date,
+--------------------
+SELECT COUNT(*) AS n_markets FROM timing_model_input_bft;
+
+SELECT
+  SUM(CASE WHEN price_30d IS NULL THEN 1 ELSE 0 END) AS missing_30d,
+  SUM(CASE WHEN price_7d  IS NULL THEN 1 ELSE 0 END) AS missing_7d,
+  SUM(CASE WHEN price_1d  IS NULL THEN 1 ELSE 0 END) AS missing_1d,
+  COUNT(*) AS total
+FROM timing_model_input_bft;
+
+SELECT * FROM timing_model_input_bft LIMIT 10;
+    
+DROP VIEW IF EXISTS timing_model_analysis_bft;
+
+CREATE VIEW timing_model_analysis_bft AS
+SELECT
+  *,
+  (price_7d - price_30d) AS delta_30_to_7,
+  (price_1d - price_7d)  AS delta_7_to_1,
+  (price_1d - price_30d) AS delta_30_to_1,
+
+  CASE
+    WHEN price_30d > 0 AND price_30d < 1 AND days_30d > 0
+    THEN -LOG(1.0 - price_30d) / days_30d
+  END AS lambda_30d,
+
+  CASE
+    WHEN price_7d > 0 AND price_7d < 1 AND days_7d > 0
+    THEN -LOG(1.0 - price_7d) / days_7d
+  END AS lambda_7d,
+
+------------------------
+-- Mean movement toward deadline
+SELECT
+  AVG(price_30d) AS avg_p30,
+  AVG(price_7d)  AS avg_p7,
+  AVG(price_1d)  AS avg_p1,
+  AVG(delta_30_to_1) AS avg_delta_30_to_1,
+  AVG(delta_30_to_7) AS avg_delta_30_to_7,
+  AVG(delta_7_to_1)  AS avg_delta_7_to_1
+FROM timing_model_analysis_bft;
+
+-- How often do markets move up vs down?
+SELECT
+  SUM(CASE WHEN delta_30_to_1 > 0 THEN 1 ELSE 0 END) AS n_up,
+  SUM(CASE WHEN delta_30_to_1 < 0 THEN 1 ELSE 0 END) AS n_down,
+  SUM(CASE WHEN delta_30_to_1 = 0 THEN 1 ELSE 0 END) AS n_flat,
+  COUNT(*) AS total
+FROM timing_model_analysis_bft
+WHERE delta_30_to_1 IS NOT NULL;
+
+-- Mean implied rates (term structure)
+SELECT
+  AVG(lambda_30d) AS avg_lambda_30d,
+  AVG(lambda_7d)  AS avg_lambda_7d,
+  AVG(lambda_1d)  AS avg_lambda_1d
+FROM timing_model_analysis_bft;
+------------------
+
+SELECT * FROM timing_model_analysis_bft;
