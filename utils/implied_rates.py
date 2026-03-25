@@ -186,17 +186,17 @@ def get_market_groups(db_path: str = "data/polymarket.db", use_semantic_groups: 
     query = f"""
         SELECT
             {group_col} as market_group,
-            event_slug,
-            event_title,
-            canonical_slug,
-            actor,
+            MAX(event_slug) as event_slug,
+            MAX(event_title) as event_title,
+            MAX(canonical_slug) as canonical_slug,
+            MAX(actor) as actor,
             COUNT(DISTINCT market_id) AS num_markets,
             COUNT(DISTINCT resolution_date) AS num_dates,
             MIN(resolution_date) AS earliest_date,
             MAX(resolution_date) AS latest_date
         FROM bets_for_timing_view
         WHERE {group_col} IS NOT NULL
-        GROUP BY {group_col}, event_slug, event_title, canonical_slug, actor
+        GROUP BY {group_col}
         HAVING num_dates > 1
         ORDER BY num_dates DESC, num_markets DESC
     """

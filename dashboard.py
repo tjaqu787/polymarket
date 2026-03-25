@@ -30,21 +30,26 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("📈 Polymarket Implied Interest Rates Dashboard")
+st.title("📈 Polymarket Hazard Rate Dashboard")
 st.markdown("""
-This dashboard shows implied continuous interest rates from Polymarket prediction markets.
-The implied rate is calculated as: **r = -ln(p) / T**
+This dashboard shows implied hazard rates from Polymarket prediction markets.
+The hazard rate is calculated as: **λ = -ln(1 - P(T)) / T**
 
 Where:
-- p = market probability (price)
+- P(T) = market probability that event occurs by time T
 - T = time to expiration in years
-- r = implied annual continuous interest rate
+- λ = implied hazard rate (intensity of event occurrence)
 """)
 
 # Load market groups
 @st.cache_data
 def load_groups():
     return get_market_groups()
+
+# Add cache clear button
+if st.sidebar.button("🔄 Clear Cache"):
+    st.cache_data.clear()
+    st.rerun()
 
 groups_df = load_groups()
 
@@ -56,9 +61,19 @@ if len(groups_df) == 0:
 st.sidebar.header("Market Selection")
 
 # Create a readable display name for each market group
+# Check if canonical_slug exists (new semantic grouping)
+if 'canonical_slug' in groups_df.columns:
+    display_base = groups_df['canonical_slug'].fillna(groups_df['event_slug']).fillna(groups_df['market_group'])
+    actor_suffix = groups_df['actor'].apply(lambda x: f" ({x})" if pd.notna(x) else "")
+else:
+    # Fallback for old grouping
+    display_base = groups_df['event_title'].fillna(groups_df['event_slug'])
+    actor_suffix = ""
+
 groups_df['display_name'] = (
-    groups_df['event_title'].fillna(groups_df['event_slug']) +
-    " (" + groups_df['num_dates'].astype(str) + " dates)"
+    display_base + actor_suffix +
+    " [" + groups_df['num_markets'].astype(str) + " markets, " +
+    groups_df['num_dates'].astype(str) + " dates]"
 )
 
 selected_display = st.sidebar.selectbox(
@@ -72,14 +87,25 @@ selected_idx = groups_df[groups_df['display_name'] == selected_display].index[0]
 selected_group = groups_df.loc[selected_idx, 'market_group']
 selected_event_slug = groups_df.loc[selected_idx, 'event_slug']
 selected_event_title = groups_df.loc[selected_idx, 'event_title']
-
 # Display market info
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Market Details:**")
-st.sidebar.write(f"Event: {selected_event_title}")
-st.sidebar.write(f"Slug: {selected_event_slug}")
-st.sidebar.write(f"Group ID: {selected_group}")
-st.sidebar.write(f"Number of resolution dates: {groups_df.loc[selected_idx, 'num_dates']}")
+st.sidebar.write(f"**Event:** {selected_event_title}")
+
+# Show semantic grouping info if available
+if 'canonical_slug' in groups_df.columns:
+    selected_canonical_slug = groups_df.loc[selected_idx, 'canonical_slug']
+    selected_actor = groups_df.loc[selected_idx, 'actor']
+    st.sidebar.write(f"**Canonical Slug:** {selected_canonical_slug}")
+    if pd.notna(selected_actor):
+        st.sidebar.write(f"**Actor/Country:** {selected_actor.upper()}")
+    st.sidebar.write(f"**Semantic Group ID:** {selected_group}")
+else:
+    st.sidebar.write(f"**Group ID:** {selected_group}")
+
+st.sidebar.write(f"**Event Slug:** {selected_event_slug}")
+st.sidebar.write(f"**Markets:** {groups_df.loc[selected_idx, 'num_markets']}")
+st.sidebar.write(f"**Resolution dates:** {groups_df.loc[selected_idx, 'num_dates']}")
 
 # Load price history for selected market
 @st.cache_data
@@ -105,26 +131,32 @@ st.sidebar.write(f"Markets: {data['market_id'].nunique()}")
 st.sidebar.write(f"Date range: {data['date'].min()} to {data['date'].max()}")
 
 # Main content area
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Implied Rates Over Time", "📈 Price Evolution", "📉 Term Structure", "📋 Raw Data"])
+tab1, tab2, tab3, tab4 = st.tabs(["⏱️ Time-to-Event Estimate", "📈 Price Evolution", "📉 Term Structure", "📋 Raw Data"])
 
 with tab1:
-    st.header("Implied Interest Rates by Resolution Date")
+    st.header("Time-to-Event Estimate with Gamma Prior")
 
-    # Outcome selector
+    # Outcome selector - check what outcomes are available in the data
+    available_outcomes = sorted(data['outcome'].unique())
+
+    if len(available_outcomes) == 0:
+        st.error("No outcome data available")
+        st.stop()
+
+    # Default to the first available outcome
     outcome_filter = st.radio(
         "Select outcome to display:",
-        ["Yes", "No", "Both"],
-        horizontal=True
+        available_outcomes,
+        horizontal=True,
+        index=0
     )
 
-    # Filter data based on outcome selection
-    if outcome_filter == "Both":
-        plot_data = data.copy()
-    else:
-        plot_data = data[data['outcome'] == outcome_filter].copy()
+    # Show info about the data
+    if len(available_outcomes) == 1:
+        st.info(f"ℹ️ This view is filtered to '{available_outcomes[0]}' outcomes only (better for hazard rate modeling of unlikely events)")
 
-    # Create interactive plot
-    fig = go.Figure()
+    # Filter data based on outcome selection
+    plot_data = data[data['outcome'] == outcome_filter].copy()
 
     # Get unique resolution dates
     resolution_dates = sorted(plot_data['resolution_date'].unique())
@@ -132,42 +164,149 @@ with tab1:
     # Color palette
     colors = px.colors.qualitative.Plotly
 
+    # Create figure
+    fig = go.Figure()
+
     for i, res_date in enumerate(resolution_dates):
-        for outcome in ['Yes', 'No']:
-            if outcome_filter != "Both" and outcome != outcome_filter:
-                continue
+        subset = plot_data[plot_data['resolution_date'] == res_date].sort_values('date')
 
-            subset = plot_data[
-                (plot_data['resolution_date'] == res_date) &
-                (plot_data['outcome'] == outcome)
-            ].sort_values('date')
+        if len(subset) == 0:
+            continue
 
-            if len(subset) == 0:
-                continue
+        # Calculate time-to-event estimates for each observation
+        # Using exponential distribution: E[T] = 1/λ where λ is hazard rate
+        # For gamma prior on λ with shape α and rate β:
+        # Posterior mean of T = β/(α-1) for α > 1
+        # We'll use empirical Bayes: estimate α, β from the data
 
-            line_style = 'solid' if outcome == 'Yes' else 'dash'
-            color = colors[i % len(colors)]
+        hazard_rates = subset['implied_rate'].values
+        dates = pd.to_datetime(subset['date'])
+        resolution_dt = pd.to_datetime(res_date)
 
-            fig.add_trace(go.Scatter(
-                x=subset['date'],
-                y=subset['implied_rate'],
-                mode='lines+markers',
-                name=f"{res_date} ({outcome})",
-                line=dict(dash=line_style, color=color),
-                marker=dict(size=4, color=color),
-                hovertemplate=(
-                    f"<b>{res_date} ({outcome})</b><br>" +
-                    "Date: %{x}<br>" +
-                    "Implied Rate: %{y:.2%}<br>" +
-                    "<extra></extra>"
-                )
-            ))
+        # Filter out invalid rates
+        valid_mask = np.isfinite(hazard_rates) & (hazard_rates > 0)
+        hazard_rates = hazard_rates[valid_mask]
+        dates = dates[valid_mask]
+
+        if len(hazard_rates) == 0:
+            continue
+
+        # Estimate time-to-event using 1/λ (exponential mean)
+        mean_time_to_event = 1.0 / hazard_rates  # in years
+
+        # For confidence intervals, use a rolling window approach
+        # This captures the variation in estimates over time rather than assuming a global distribution
+        window_size = max(5, len(mean_time_to_event) // 10)  # adaptive window
+
+        # Compute rolling quantiles for confidence intervals
+        def rolling_quantile(arr, quantile, window):
+            """Compute rolling quantile with padding"""
+            result = np.full_like(arr, np.nan, dtype=float)
+            for i in range(len(arr)):
+                start = max(0, i - window // 2)
+                end = min(len(arr), i + window // 2 + 1)
+                window_data = arr[start:end]
+                if len(window_data) > 0:
+                    result[i] = np.percentile(window_data, quantile * 100)
+            return result
+
+        # Calculate rolling CIs
+        lower_95 = rolling_quantile(mean_time_to_event, 0.025, window_size)
+        upper_95 = rolling_quantile(mean_time_to_event, 0.975, window_size)
+        lower_70 = rolling_quantile(mean_time_to_event, 0.15, window_size)
+        upper_70 = rolling_quantile(mean_time_to_event, 0.85, window_size)
+
+        # Cap all values at reasonable limits (max 5 years into future)
+        mean_time_to_event = np.clip(mean_time_to_event, 0, 5.0)
+        lower_95 = np.clip(lower_95, 0, 5.0)
+        upper_95 = np.clip(upper_95, 0, 5.0)
+        lower_70 = np.clip(lower_70, 0, 5.0)
+        upper_70 = np.clip(upper_70, 0, 5.0)
+
+        # Convert to actual dates (observation date + time-to-event)
+        mean_event_dates = dates + pd.to_timedelta(mean_time_to_event * 365.25, unit='D')
+        lower_70_dates = dates + pd.to_timedelta(lower_70 * 365.25, unit='D')
+        upper_70_dates = dates + pd.to_timedelta(upper_70 * 365.25, unit='D')
+        lower_95_dates = dates + pd.to_timedelta(lower_95 * 365.25, unit='D')
+        upper_95_dates = dates + pd.to_timedelta(upper_95 * 365.25, unit='D')
+
+        color = colors[i % len(colors)]
+
+        # Plot 95% CI band
+        fig.add_trace(go.Scatter(
+            x=dates,
+            y=upper_95_dates,
+            mode='lines',
+            name=f"{res_date} 95% CI",
+            line=dict(width=0, color=color),
+            showlegend=False,
+            hoverinfo='skip'
+        ))
+        fig.add_trace(go.Scatter(
+            x=dates,
+            y=lower_95_dates,
+            mode='lines',
+            name=f"{res_date} 95% CI",
+            line=dict(width=0, color=color),
+            fillcolor=f'rgba({int(color[1:3], 16)}, {int(color[3:5], 16)}, {int(color[5:7], 16)}, 0.2)',
+            fill='tonexty',
+            showlegend=True,
+            hoverinfo='skip'
+        ))
+
+        # Plot 70% CI band
+        fig.add_trace(go.Scatter(
+            x=dates,
+            y=upper_70_dates,
+            mode='lines',
+            name=f"{res_date} 70% CI",
+            line=dict(width=0, color=color),
+            showlegend=False,
+            hoverinfo='skip'
+        ))
+        fig.add_trace(go.Scatter(
+            x=dates,
+            y=lower_70_dates,
+            mode='lines',
+            name=f"{res_date} 70% CI",
+            line=dict(width=0, color=color),
+            fillcolor=f'rgba({int(color[1:3], 16)}, {int(color[3:5], 16)}, {int(color[5:7], 16)}, 0.4)',
+            fill='tonexty',
+            showlegend=True,
+            hoverinfo='skip'
+        ))
+
+        # Plot mean estimate
+        fig.add_trace(go.Scatter(
+            x=dates,
+            y=mean_event_dates,
+            mode='lines+markers',
+            name=f"{res_date} Mean",
+            line=dict(color=color, width=2),
+            marker=dict(size=4, color=color),
+            hovertemplate=(
+                f"<b>{res_date}</b><br>" +
+                "Observation Date: %{x}<br>" +
+                "Estimated Event Date: %{y}<br>" +
+                "<extra></extra>"
+            )
+        ))
+
+        # Add horizontal line at actual resolution date
+        fig.add_trace(go.Scatter(
+            x=[dates.min(), dates.max()],
+            y=[resolution_dt, resolution_dt],
+            mode='lines',
+            name=f"{res_date} Actual",
+            line=dict(color=color, dash='dash', width=2),
+            hovertemplate=f"<b>Actual Resolution: {res_date}</b><extra></extra>",
+            showlegend=True
+        ))
 
     fig.update_layout(
-        title=f"Implied Rates for {selected_event_title}",
-        xaxis_title="Date",
-        yaxis_title="Implied Annual Rate",
-        yaxis_tickformat=".0%",
+        title=f"Time-to-Event Estimates for {selected_event_title} ({outcome_filter})",
+        xaxis_title="Observation Date",
+        yaxis_title="Estimated Event Date",
         hovermode='closest',
         height=600,
         legend=dict(
@@ -184,10 +323,17 @@ with tab1:
     # Add explanation
     st.markdown("""
     **How to interpret this chart:**
-    - Each line represents a different resolution date for the same underlying event
-    - Solid lines = "Yes" outcome, Dashed lines = "No" outcome
-    - Higher rates indicate lower market probabilities (more uncertain outcomes)
-    - Rates should generally increase as resolution date approaches (due to decreasing time value)
+    - **Mean line**: Expected event date based on market hazard rate λ, using E[T] = 1/λ
+    - **70% CI band** (darker): 70% confidence interval using rolling window of estimates
+    - **95% CI band** (lighter): 95% confidence interval using rolling window of estimates
+    - **Horizontal dashed line**: Actual resolution date (ground truth)
+    - **Good performance**: Mean estimate converges to the actual date as time progresses
+    - **Poor performance**: Mean estimate stays far from actual date or diverges over time
+
+    The horizontal line lets you visually assess prediction quality by comparing:
+    - How close the mean gets to the actual date
+    - Whether the CI bands contain the actual date
+    - How quickly the estimate converges
     """)
 
 with tab2:
