@@ -14,10 +14,10 @@ DB_PATH = "data/polymarket.db"
 
 strategy = CarryStrategy(config={
     "max_days_to_expiry": 90,     # Only markets < 90 days to expiry
-    "high_threshold": 0.90,        # Buy (long) when price > 0.90
-    "low_threshold": 0.10,         # Short when price < 0.10
-    "stop_loss_long": 0.85,        # Exit long if drops below 0.85
-    "stop_loss_short": 0.15,       # Exit short if rises above 0.15
+    "high_threshold": 0.95,        # Buy (long) when price > 0.90
+    "low_threshold": 0.05,         # Short when price < 0.10
+    "stop_loss_long": 0.9,        # Exit long if drops below 0.85
+    "stop_loss_short": 0.1,       # Exit short if rises above 0.15
 })
 
 data_loader = DataLoader(DB_PATH)
