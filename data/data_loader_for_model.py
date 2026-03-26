@@ -464,7 +464,8 @@ class PolymarketDataLoader:
                          outcome: str = 'Yes',
                          start_date: Optional[str] = None,
                          end_date: Optional[str] = None,
-                         use_semantic_groups: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                         use_semantic_groups: bool = True,
+                         load_token_features: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """
         Load complete dataset with prices, implied rates, and term structure metrics.
 
@@ -476,6 +477,7 @@ class PolymarketDataLoader:
             start_date: Optional start date filter
             end_date: Optional end date filter
             use_semantic_groups: Use semantic_group_id for grouping (default True)
+            load_token_features: Load token cooccurrence features (default False, not used by model)
 
         Returns:
             Tuple of (price_data_with_rates, term_structure_metrics, resolved_outcomes)
@@ -527,30 +529,34 @@ class PolymarketDataLoader:
             if 'market_group' in rates_df.columns and 'market_group' != group_col:
                 rates_df = rates_df.drop(columns=['market_group'])
 
-        print("\nLoading text token features...")
-        market_ids = market_df['market_id'].unique().tolist()
-        token_features_df = self.get_token_features(market_ids=market_ids)
-        if len(token_features_df) > 0:
-            print(f"Loaded token features for {len(token_features_df)} markets")
-            rates_df = rates_df.merge(
-                token_features_df,
-                on='market_id',
-                how='left'
-            )
-        else:
-            print("No token features found (tables may not exist)")
+        # Token cooccurrence features (optional, not used by default model)
+        if load_token_features:
+            print("\nLoading text token features...")
+            market_ids = market_df['market_id'].unique().tolist()
+            token_features_df = self.get_token_features(market_ids=market_ids)
+            if len(token_features_df) > 0:
+                print(f"Loaded token features for {len(token_features_df)} markets")
+                rates_df = rates_df.merge(
+                    token_features_df,
+                    on='market_id',
+                    how='left'
+                )
+            else:
+                print("No token features found (tables may not exist)")
 
-        print("\nLoading token cooccurrence features...")
-        cooccurrence_features_df = self.get_cooccurrence_features(market_ids=market_ids)
-        if len(cooccurrence_features_df) > 0:
-            print(f"Loaded cooccurrence features for {len(cooccurrence_features_df)} markets")
-            rates_df = rates_df.merge(
-                cooccurrence_features_df,
-                on='market_id',
-                how='left'
-            )
+            print("\nLoading token cooccurrence features...")
+            cooccurrence_features_df = self.get_cooccurrence_features(market_ids=market_ids)
+            if len(cooccurrence_features_df) > 0:
+                print(f"Loaded cooccurrence features for {len(cooccurrence_features_df)} markets")
+                rates_df = rates_df.merge(
+                    cooccurrence_features_df,
+                    on='market_id',
+                    how='left'
+                )
+            else:
+                print("No cooccurrence features found (tables may not exist)")
         else:
-            print("No cooccurrence features found (tables may not exist)")
+            print("\nSkipping token cooccurrence features (not used by model)")
 
         print("\nLoading resolved outcomes...")
         resolved_df = self.get_resolved_outcomes(event_ids=event_ids)

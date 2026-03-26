@@ -131,7 +131,7 @@ st.sidebar.write(f"Markets: {data['market_id'].nunique()}")
 st.sidebar.write(f"Date range: {data['date'].min()} to {data['date'].max()}")
 
 # Main content area
-tab1, tab2, tab3, tab4 = st.tabs(["⏱️ Time-to-Event Estimate", "📈 Price Evolution", "📉 Term Structure", "📋 Raw Data"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["⏱️ Time-to-Event Estimate", "📈 Price Evolution", "📉 Term Structure", "📋 Raw Data", "🎯 Backtest Analysis"])
 
 with tab1:
     st.header("Time-to-Event Estimate with Gamma Prior")
@@ -626,6 +626,339 @@ with tab4:
         file_name=f"implied_rates_{selected_event_slug}_{datetime.now().strftime('%Y%m%d')}.csv",
         mime="text/csv"
     )
+
+with tab5:
+    st.header("Backtest Trade Performance Analysis")
+
+    import sqlite3
+    import os
+
+    # Check if backtest files exist
+    poisson_file = 'backtest/backtest_output/poisson_trades.csv'
+    carry_file = 'backtest/backtest_output/carry_trades.csv'
+
+    if not os.path.exists(poisson_file) or not os.path.exists(carry_file):
+        st.warning("⚠️ Backtest trade files not found. Please run a backtest first to generate trade data.")
+        st.info("Expected files:\n- `backtest/backtest_output/poisson_trades.csv`\n- `backtest/backtest_output/carry_trades.csv`")
+        st.stop()
+
+    @st.cache_data
+    def load_backtest_data():
+        """Load backtest trades and enrich with semantic groups"""
+        # Load trades
+        poisson_df = pd.read_csv(poisson_file)
+        carry_df = pd.read_csv(carry_file)
+
+        # Get all unique market IDs
+        all_market_ids = set(poisson_df['market_id'].unique()) | set(carry_df['market_id'].unique())
+        all_market_ids = [int(x) for x in all_market_ids]
+
+        # Query database for semantic groups (batch to avoid SQLite limit)
+        conn = sqlite3.connect('data/polymarket.db')
+        batch_size = 500
+        all_results = []
+
+        for i in range(0, len(all_market_ids), batch_size):
+            batch = all_market_ids[i:i+batch_size]
+            placeholders = ','.join('?' * len(batch))
+
+            query = f"""
+            SELECT DISTINCT
+                m.market_id,
+                smg.semantic_group_id,
+                smg.canonical_slug,
+                smg.actor,
+                m.event_id,
+                m.question,
+                m.market_slug
+            FROM markets m
+            LEFT JOIN semantic_market_groups smg ON m.market_id = smg.market_id
+            WHERE m.market_id IN ({placeholders})
+            """
+
+            batch_df = pd.read_sql_query(query, conn, params=batch)
+            all_results.append(batch_df)
+
+        conn.close()
+
+        market_info = pd.concat(all_results, ignore_index=True) if all_results else pd.DataFrame()
+
+        # Ensure correct types for merge
+        poisson_df['market_id'] = poisson_df['market_id'].astype(int)
+        carry_df['market_id'] = carry_df['market_id'].astype(int)
+        market_info['market_id'] = market_info['market_id'].astype(int)
+
+        # Merge semantic groups
+        poisson_df = poisson_df.merge(
+            market_info[['market_id', 'semantic_group_id', 'canonical_slug', 'actor', 'question']],
+            on='market_id',
+            how='left'
+        )
+        carry_df = carry_df.merge(
+            market_info[['market_id', 'semantic_group_id', 'canonical_slug', 'actor', 'question']],
+            on='market_id',
+            how='left'
+        )
+
+        # Add strategy label
+        poisson_df['strategy'] = 'Poisson'
+        carry_df['strategy'] = 'Carry'
+
+        return poisson_df, carry_df, market_info
+
+    with st.spinner("Loading backtest data..."):
+        poisson_trades, carry_trades, market_info = load_backtest_data()
+
+    # Strategy selector
+    strategy_filter = st.radio(
+        "Select Strategy:",
+        ["Both", "Poisson", "Carry"],
+        horizontal=True
+    )
+
+    # Combine trades based on filter
+    if strategy_filter == "Both":
+        trades = pd.concat([poisson_trades, carry_trades], ignore_index=True)
+    elif strategy_filter == "Poisson":
+        trades = poisson_trades
+    else:
+        trades = carry_trades
+
+    # Overall metrics
+    st.subheader("📊 Overall Performance")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        total_pnl = trades['pnl'].sum()
+        st.metric(
+            "Total PnL",
+            f"${total_pnl:.2f}",
+            delta=None,
+            delta_color="normal" if total_pnl >= 0 else "inverse"
+        )
+
+    with col2:
+        win_rate = (trades['pnl'] > 0).sum() / len(trades) * 100
+        st.metric("Win Rate", f"{win_rate:.1f}%")
+
+    with col3:
+        avg_return = trades['return_pct'].mean()
+        st.metric("Avg Return", f"{avg_return:.2f}%")
+
+    with col4:
+        num_trades = len(trades)
+        st.metric("Total Trades", f"{num_trades:,}")
+
+    st.markdown("---")
+
+    # Performance by semantic group
+    st.subheader("🎯 Performance by Semantic Group")
+
+    # Calculate group performance
+    group_perf = trades.groupby('semantic_group_id').agg({
+        'pnl': ['sum', 'mean', 'count'],
+        'return_pct': 'mean',
+        'market_id': 'nunique'
+    }).round(4)
+
+    group_perf.columns = ['total_pnl', 'avg_pnl', 'num_trades', 'avg_return_pct', 'num_markets']
+
+    # Add sample questions
+    group_questions = trades.groupby('semantic_group_id').agg({
+        'question': lambda x: x.iloc[0] if len(x) > 0 else '',
+        'canonical_slug': 'first'
+    })
+
+    group_perf = group_perf.join(group_questions)
+    group_perf = group_perf.sort_values('total_pnl', ascending=False)
+
+    # Filter options
+    col1, col2 = st.columns(2)
+
+    with col1:
+        sort_by = st.selectbox(
+            "Sort by:",
+            ['Total PnL', 'Avg Return %', 'Num Trades'],
+            index=0
+        )
+
+    with col2:
+        show_top = st.slider("Show top/bottom N groups:", 5, 50, 20, 5)
+
+    # Map sort option to column
+    sort_map = {
+        'Total PnL': 'total_pnl',
+        'Avg Return %': 'avg_return_pct',
+        'Num Trades': 'num_trades'
+    }
+
+    group_perf_sorted = group_perf.sort_values(sort_map[sort_by], ascending=False)
+
+    # Show top performers
+    st.markdown(f"**🏆 Top {show_top} Performing Groups**")
+
+    top_performers = group_perf_sorted.head(show_top).reset_index()
+    top_performers_display = top_performers[['semantic_group_id', 'total_pnl', 'num_trades', 'avg_return_pct', 'question']].copy()
+    top_performers_display.columns = ['Semantic Group', 'Total PnL ($)', 'Trades', 'Avg Return (%)', 'Sample Question']
+
+    # Format for display
+    top_performers_display['Total PnL ($)'] = top_performers_display['Total PnL ($)'].apply(lambda x: f"${x:.2f}")
+    top_performers_display['Avg Return (%)'] = top_performers_display['Avg Return (%)'].apply(lambda x: f"{x:.2f}%")
+    top_performers_display['Sample Question'] = top_performers_display['Sample Question'].str[:80]
+
+    st.dataframe(top_performers_display, use_container_width=True, hide_index=True)
+
+    # Show bottom performers
+    st.markdown(f"**📉 Bottom {show_top} Performing Groups**")
+
+    bottom_performers = group_perf_sorted.tail(show_top).iloc[::-1].reset_index()
+    bottom_performers_display = bottom_performers[['semantic_group_id', 'total_pnl', 'num_trades', 'avg_return_pct', 'question']].copy()
+    bottom_performers_display.columns = ['Semantic Group', 'Total PnL ($)', 'Trades', 'Avg Return (%)', 'Sample Question']
+
+    # Format for display
+    bottom_performers_display['Total PnL ($)'] = bottom_performers_display['Total PnL ($)'].apply(lambda x: f"${x:.2f}")
+    bottom_performers_display['Avg Return (%)'] = bottom_performers_display['Avg Return (%)'].apply(lambda x: f"{x:.2f}%")
+    bottom_performers_display['Sample Question'] = bottom_performers_display['Sample Question'].str[:80]
+
+    st.dataframe(bottom_performers_display, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    # Visualizations
+    st.subheader("📈 Performance Visualizations")
+
+    # PnL distribution by group
+    fig_pnl = go.Figure()
+
+    # Filter to groups with at least 2 trades for cleaner viz
+    sig_groups = group_perf[group_perf['num_trades'] >= 2].sort_values('total_pnl', ascending=True)
+
+    # Show top 30 and bottom 30
+    show_groups = pd.concat([sig_groups.head(30), sig_groups.tail(30)])
+
+    fig_pnl.add_trace(go.Bar(
+        y=show_groups.index,
+        x=show_groups['total_pnl'],
+        orientation='h',
+        marker=dict(
+            color=show_groups['total_pnl'],
+            colorscale='RdYlGn',
+            colorbar=dict(title="PnL ($)"),
+            line=dict(width=0.5, color='black')
+        ),
+        text=show_groups['total_pnl'].apply(lambda x: f"${x:.2f}"),
+        textposition='outside',
+        hovertemplate=(
+            "<b>%{y}</b><br>" +
+            "Total PnL: $%{x:.2f}<br>" +
+            "Trades: %{customdata[0]}<br>" +
+            "Avg Return: %{customdata[1]:.2f}%<br>" +
+            "<extra></extra>"
+        ),
+        customdata=show_groups[['num_trades', 'avg_return_pct']].values
+    ))
+
+    fig_pnl.update_layout(
+        title=f"PnL by Semantic Group ({strategy_filter} Strategy)",
+        xaxis_title="Total PnL ($)",
+        yaxis_title="Semantic Group",
+        height=800,
+        showlegend=False,
+        yaxis=dict(tickfont=dict(size=8))
+    )
+
+    st.plotly_chart(fig_pnl, use_container_width=True)
+
+    # Win rate vs number of trades scatter
+    fig_scatter = px.scatter(
+        group_perf.reset_index(),
+        x='num_trades',
+        y='avg_return_pct',
+        size='total_pnl',
+        color='total_pnl',
+        color_continuous_scale='RdYlGn',
+        hover_data=['semantic_group_id', 'question'],
+        labels={
+            'num_trades': 'Number of Trades',
+            'avg_return_pct': 'Average Return (%)',
+            'total_pnl': 'Total PnL ($)'
+        },
+        title=f"Return vs Trade Count by Semantic Group ({strategy_filter} Strategy)"
+    )
+
+    fig_scatter.update_traces(marker=dict(line=dict(width=1, color='black')))
+    fig_scatter.add_hline(y=0, line_dash="dash", line_color="gray", annotation_text="Break-even")
+    fig_scatter.update_layout(height=600)
+
+    st.plotly_chart(fig_scatter, use_container_width=True)
+
+    st.markdown("---")
+
+    # Detailed trade explorer
+    st.subheader("🔍 Trade Explorer")
+
+    # Select a semantic group to explore
+    available_groups = sorted([g for g in trades['semantic_group_id'].unique() if pd.notna(g)])
+
+    if len(available_groups) > 0:
+        selected_semantic_group = st.selectbox(
+            "Select a semantic group to explore:",
+            available_groups,
+            index=0
+        )
+
+        # Filter trades for this group
+        group_trades = trades[trades['semantic_group_id'] == selected_semantic_group].copy()
+
+        # Show summary metrics for this group
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.metric("Total PnL", f"${group_trades['pnl'].sum():.2f}")
+
+        with col2:
+            st.metric("Trades", len(group_trades))
+
+        with col3:
+            group_win_rate = (group_trades['pnl'] > 0).sum() / len(group_trades) * 100
+            st.metric("Win Rate", f"{group_win_rate:.1f}%")
+
+        with col4:
+            st.metric("Avg Return", f"{group_trades['return_pct'].mean():.2f}%")
+
+        # Show sample question
+        if pd.notna(group_trades['question'].iloc[0]):
+            st.info(f"📝 Sample question: {group_trades['question'].iloc[0]}")
+
+        # Show all trades for this group
+        st.markdown("**All Trades:**")
+
+        trade_display = group_trades[[
+            'strategy', 'entry_date', 'exit_date', 'entry_price', 'exit_price',
+            'size', 'pnl', 'return_pct', 'holding_period_days', 'reason'
+        ]].copy()
+
+        trade_display = trade_display.sort_values('entry_date')
+
+        # Format columns
+        trade_display['pnl'] = trade_display['pnl'].apply(lambda x: f"${x:.4f}")
+        trade_display['return_pct'] = trade_display['return_pct'].apply(lambda x: f"{x:.2f}%")
+        trade_display['entry_price'] = trade_display['entry_price'].apply(lambda x: f"{x:.4f}")
+        trade_display['exit_price'] = trade_display['exit_price'].apply(lambda x: f"{x:.4f}")
+
+        st.dataframe(trade_display, use_container_width=True, hide_index=True)
+
+        # Download trades for this group
+        csv = group_trades.to_csv(index=False)
+        st.download_button(
+            label=f"Download trades for {selected_semantic_group}",
+            data=csv,
+            file_name=f"trades_{selected_semantic_group}_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv"
+        )
+    else:
+        st.warning("No semantic groups found in trade data.")
 
 # Footer
 st.markdown("---")
