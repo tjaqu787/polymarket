@@ -112,10 +112,21 @@ class DataLoader:
         df['time_to_expiration'] = (df['resolution_date'] - df['date']).dt.days / 365.25
         df['time_to_expiration'] = df['time_to_expiration'].clip(lower=1/365.25)  # Min 1 day
 
-        # Calculate implied rate for Yes outcomes
+        # Calculate implied rate for both Yes and No outcomes
         df['implied_rate'] = np.nan
+
+        # Handle Yes outcomes
         yes_mask = df['outcome'] == 'Yes'
-        df.loc[yes_mask, 'implied_rate'] = -np.log(df.loc[yes_mask, 'price']) / df.loc[yes_mask, 'time_to_expiration']
+        if yes_mask.any():
+            yes_price_clipped = df.loc[yes_mask, 'price'].clip(1e-6, 1-1e-6)
+            df.loc[yes_mask, 'implied_rate'] = -np.log(yes_price_clipped) / df.loc[yes_mask, 'time_to_expiration']
+
+        # Handle No outcomes (convert to Yes first)
+        no_mask = df['outcome'] == 'No'
+        if no_mask.any():
+            yes_price = 1 - df.loc[no_mask, 'price']
+            yes_price_clipped = yes_price.clip(1e-6, 1-1e-6)
+            df.loc[no_mask, 'implied_rate'] = -np.log(yes_price_clipped) / df.loc[no_mask, 'time_to_expiration']
 
         return df
 
@@ -123,7 +134,8 @@ class DataLoader:
         self,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        min_volume: float = 100
+        min_volume: float = 100,
+        use_semantic_groups: bool = True
     ) -> pd.DataFrame:
         """
         Load timing-based prediction markets (uses bets_for_timing_view).
@@ -143,6 +155,9 @@ class DataLoader:
             bft.market_id,
             bft.market_group,
             bft.event_id,
+            bft.semantic_group_id,
+            bft.canonical_slug,
+            bft.actor,
             bft.question,
             bft.event_title,
             bft.event_slug,
@@ -179,13 +194,30 @@ class DataLoader:
         df['date'] = pd.to_datetime(df['date'])
         df['resolution_date'] = pd.to_datetime(df['resolution_date'])
 
+        # Create grouping column based on parameter
+        if use_semantic_groups and 'semantic_group_id' in df.columns and df['semantic_group_id'].notna().any():
+            df['group_col'] = df['semantic_group_id'].fillna(df['event_id'])
+        else:
+            df['group_col'] = df['event_id']  # Fallback to event_id
+
         # Calculate metrics
         df['time_to_expiration'] = (df['resolution_date'] - df['date']).dt.days / 365.25
         df['time_to_expiration'] = df['time_to_expiration'].clip(lower=1/365.25)
 
+        # Calculate implied rate for No outcomes (convert to Yes first for consistency)
         df['implied_rate'] = np.nan
+        no_mask = df['outcome'] == 'No'
+        if no_mask.any():
+            yes_price = 1 - df.loc[no_mask, 'price']
+            # Clip to avoid log(0) or log(negative)
+            yes_price_clipped = yes_price.clip(1e-6, 1-1e-6)
+            df.loc[no_mask, 'implied_rate'] = -np.log(yes_price_clipped) / df.loc[no_mask, 'time_to_expiration']
+
+        # Also handle Yes outcomes if they exist (for backward compatibility)
         yes_mask = df['outcome'] == 'Yes'
-        df.loc[yes_mask, 'implied_rate'] = -np.log(df.loc[yes_mask, 'price']) / df.loc[yes_mask, 'time_to_expiration']
+        if yes_mask.any():
+            yes_price_clipped = df.loc[yes_mask, 'price'].clip(1e-6, 1-1e-6)
+            df.loc[yes_mask, 'implied_rate'] = -np.log(yes_price_clipped) / df.loc[yes_mask, 'time_to_expiration']
 
         return df
 
@@ -269,9 +301,21 @@ class DataLoader:
         df['time_to_expiration'] = (df['resolution_date'] - df['date']).dt.days / 365.25
         df['time_to_expiration'] = df['time_to_expiration'].clip(lower=1/365.25)
 
+        # Calculate implied rate for both Yes and No outcomes
         df['implied_rate'] = np.nan
+
+        # Handle Yes outcomes
         yes_mask = df['outcome'] == 'Yes'
-        df.loc[yes_mask, 'implied_rate'] = -np.log(df.loc[yes_mask, 'price']) / df.loc[yes_mask, 'time_to_expiration']
+        if yes_mask.any():
+            yes_price_clipped = df.loc[yes_mask, 'price'].clip(1e-6, 1-1e-6)
+            df.loc[yes_mask, 'implied_rate'] = -np.log(yes_price_clipped) / df.loc[yes_mask, 'time_to_expiration']
+
+        # Handle No outcomes (convert to Yes first)
+        no_mask = df['outcome'] == 'No'
+        if no_mask.any():
+            yes_price = 1 - df.loc[no_mask, 'price']
+            yes_price_clipped = yes_price.clip(1e-6, 1-1e-6)
+            df.loc[no_mask, 'implied_rate'] = -np.log(yes_price_clipped) / df.loc[no_mask, 'time_to_expiration']
 
         return df
 

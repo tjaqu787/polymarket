@@ -52,6 +52,26 @@ class PoissonTimingStrategy(Strategy):
     def name(self) -> str:
         return f"PoissonTiming_{self.distribution}_CI{int(self.ci_level*100)}"
 
+    def convert_no_price_to_yes(self, no_price: float) -> float:
+        """Convert 'No' outcome price to equivalent 'Yes' price.
+
+        Since P(No) = 1 - P(Yes), we convert No prices to Yes prices.
+        """
+        return 1.0 - no_price
+
+    def convert_yes_bounds_to_no(self, yes_lower: float, yes_upper: float, yes_median: float) -> Dict[str, float]:
+        """Convert 'Yes' outcome CI bounds to 'No' outcome bounds.
+
+        Since P(No) = 1 - P(Yes), bounds are inverted and swapped:
+        - No lower bound = 1 - Yes upper bound
+        - No upper bound = 1 - Yes lower bound
+        """
+        return {
+            'lower': 1.0 - yes_upper,   # No lower = 1 - Yes upper (bounds swap!)
+            'upper': 1.0 - yes_lower,   # No upper = 1 - Yes lower
+            'median': 1.0 - yes_median
+        }
+
     def extract_target_date(self, question: str) -> Optional[datetime]:
         """Extract target date from question text."""
         patterns = [
@@ -99,7 +119,7 @@ class PoissonTimingStrategy(Strategy):
                 continue
 
             target = self.extract_target_date(row['question'])
-            if target is None or row['outcome'] != 'Yes':
+            if target is None or row['outcome'] != 'No':
                 continue
 
             # Calculate time to target
@@ -107,12 +127,17 @@ class PoissonTimingStrategy(Strategy):
             if days_to_target <= 0:  # Skip past targets
                 continue
 
+            # Convert No price to Yes price for model fitting
+            # The Poisson model expects an increasing CDF (P(Yes) increases with time)
+            yes_price = self.convert_no_price_to_yes(row['price'])
+
             markets.append({
                 'market_id': row['market_id'],
                 'target_date': target,
                 'days_to_target': days_to_target,
                 'years_to_target': days_to_target / 365.25,
-                'price': row['price']
+                'price': yes_price,  # Use converted Yes price for fitting
+                'original_no_price': row['price']  # Keep for reference
             })
 
         if len(markets) < self.min_buckets:
@@ -193,11 +218,21 @@ class PoissonTimingStrategy(Strategy):
 
         ci = fit_result['credible_intervals']
 
-        return {
+        # Get Yes outcome bounds from model (model was fitted with Yes prices)
+        yes_bounds = {
             'lower': ci['lower'][idx],
             'upper': ci['upper'][idx],
             'median': ci['median'][idx]
         }
+
+        # Convert Yes bounds to No bounds (invert and swap)
+        no_bounds = self.convert_yes_bounds_to_no(
+            yes_bounds['lower'],
+            yes_bounds['upper'],
+            yes_bounds['median']
+        )
+
+        return no_bounds
 
     def _calculate_position_size(self, price: float, exposure_fraction: float) -> float:
         """
@@ -294,7 +329,7 @@ class PoissonTimingStrategy(Strategy):
             signals.append(Signal(
                 market_id=row['market_id'],
                 token_id=row['token_id'],
-                outcome='Yes',
+                outcome='No',  # Changed from 'Yes' to 'No'
                 signal_type=signal_type,
                 size=size,
                 price=row['price'],
@@ -321,9 +356,12 @@ class PoissonTimingStrategy(Strategy):
         if today_data.empty:
             return signals
 
-        # Group by event
-        for event_id in today_data['event_id'].unique():
-            event_data = today_data[today_data['event_id'] == event_id]
+        # Group by semantic group (or fallback to event_id)
+        # Use group_col if available (set by data loader), otherwise fallback to event_id
+        group_col = 'group_col' if 'group_col' in today_data.columns else 'event_id'
+
+        for group_id in today_data[group_col].unique():
+            event_data = today_data[today_data[group_col] == group_id]
 
             # Check if this is a time-distributed event
             if not self.is_time_distributed_event(event_data):
@@ -331,29 +369,29 @@ class PoissonTimingStrategy(Strategy):
 
             # Check if we need to (re)fit the model
             need_fit = (
-                event_id not in self.fitted_events or
-                event_id not in self.last_fit_date or
-                (current_date - self.last_fit_date[event_id]).days >= self.refit_days
+                group_id not in self.fitted_events or
+                group_id not in self.last_fit_date or
+                (current_date - self.last_fit_date[group_id]).days >= self.refit_days
             )
 
             if need_fit:
                 fit_result = self.fit_event_timing(event_data, current_date)
                 if fit_result is not None:
-                    self.fitted_events[event_id] = fit_result
-                    self.last_fit_date[event_id] = current_date
+                    self.fitted_events[group_id] = fit_result
+                    self.last_fit_date[group_id] = current_date
                 else:
                     # Fitting failed, skip this event
                     continue
 
             # Get fitted model for this event
-            if event_id not in self.fitted_events:
+            if group_id not in self.fitted_events:
                 continue
 
-            fit_result = self.fitted_events[event_id]
+            fit_result = self.fitted_events[group_id]
 
             # PASS 1: Collect all markets that would trigger signals
             potential_signals = []
-            for _, row in event_data[event_data['outcome'] == 'Yes'].iterrows():
+            for _, row in event_data[event_data['outcome'] == 'No'].iterrows():
                 market_id = row['market_id']
                 market_price = row['price']
 
@@ -365,7 +403,7 @@ class PoissonTimingStrategy(Strategy):
 
                 lower_bound = ci_bounds['lower']
                 upper_bound = ci_bounds['upper']
-                current_position = self.get_position(market_id, 'Yes')
+                current_position = self.get_position(market_id, 'No')
 
                 # Check which signal type this would trigger
                 signal_info = None
