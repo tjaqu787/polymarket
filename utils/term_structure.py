@@ -13,7 +13,7 @@ from typing import Optional, Tuple, Dict
 from scipy.optimize import minimize
 from scipy.interpolate import UnivariateSpline
 
-from .implied_rates import (
+from utils.implied_rates import (
     load_price_history,
     calculate_implied_rates_for_market_group,
     get_market_groups

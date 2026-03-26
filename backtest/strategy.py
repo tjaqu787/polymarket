@@ -13,6 +13,8 @@ class SignalType(Enum):
     """Trading signal types."""
     BUY = "buy"
     SELL = "sell"
+    SHORT = "short"
+    COVER = "cover"
     HOLD = "hold"
     CLOSE = "close"
 
@@ -49,6 +51,7 @@ class Strategy(ABC):
         self.config = config or {}
         self.positions = {}  # Current positions
         self.signals = []  # Historical signals
+        self._portfolio = None  # Portfolio reference for position sizing
 
     @property
     @abstractmethod
@@ -114,6 +117,27 @@ class Strategy(ABC):
             del self.positions[key]
         else:
             self.positions[key] = size
+
+    @property
+    def portfolio_value(self) -> float:
+        """
+        Get current portfolio value for position sizing.
+
+        Returns:
+            Current total portfolio value (0.0 if portfolio not set)
+        """
+        if self._portfolio is None:
+            return 0.0
+        return self._portfolio.total_value
+
+    def set_portfolio(self, portfolio):
+        """
+        Set portfolio reference (called by backtester).
+
+        Args:
+            portfolio: Portfolio instance
+        """
+        self._portfolio = portfolio
 
 
 class BuyAndHoldStrategy(Strategy):

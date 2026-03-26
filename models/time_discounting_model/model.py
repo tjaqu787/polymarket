@@ -8,15 +8,7 @@ Model Structure (see mermaid diagram below):
 - Hierarchical priors by category (politics, crypto, sports, etc.)
 - Volume-based concentration parameters
 - Term structure, implied rates, and discount function signals
-- Slug-based cooccurrence features (token counts, document frequencies, cooccurrence patterns)
 - Beta-binomial likelihood for resolved events
-
-SLUG-BASED FEATURES INTEGRATED:
-- Token count (number of unique tokens in market slug/question)
-- Average token document frequency (how common are the tokens across all markets)
-- Max cooccurrence (strength of token pair relationships)
-- Token diversity (ratio of unique to total tokens)
-These are loaded from timing_text_features and timing_token_cooccurrence tables.
 """
 
 import pymc as pm
@@ -159,28 +151,9 @@ class TimeDiscountingModel:
         latest_prices['implied_rate'] = latest_prices['implied_rate'].fillna(0)
         latest_prices['volume_num'] = latest_prices['volume_num'].fillna(0)
 
-        # Fill NaNs in cooccurrence features
-        latest_prices['token_count'] = latest_prices['token_count'].fillna(0)
-        latest_prices['avg_token_df'] = latest_prices['avg_token_df'].fillna(0)
-        latest_prices['max_token_df'] = latest_prices['max_token_df'].fillna(0)
-        latest_prices['token_diversity'] = latest_prices['token_diversity'].fillna(0)
-        latest_prices['num_pairs'] = latest_prices['num_pairs'].fillna(0)
-        latest_prices['avg_cooccurrence'] = latest_prices['avg_cooccurrence'].fillna(0)
-        latest_prices['max_cooccurrence'] = latest_prices['max_cooccurrence'].fillna(0)
-
         # Normalize volume for stability
         volume_normalized = np.log1p(latest_prices['volume_num'])
         volume_normalized = (volume_normalized - volume_normalized.mean()) / (volume_normalized.std() + 1e-6)
-
-        # Normalize cooccurrence features
-        token_count_norm = np.log1p(latest_prices['token_count'])
-        token_count_norm = (token_count_norm - token_count_norm.mean()) / (token_count_norm.std() + 1e-6)
-
-        avg_token_df_norm = np.log1p(latest_prices['avg_token_df'])
-        avg_token_df_norm = (avg_token_df_norm - avg_token_df_norm.mean()) / (avg_token_df_norm.std() + 1e-6)
-
-        max_cooccurrence_norm = np.log1p(latest_prices['max_cooccurrence'])
-        max_cooccurrence_norm = (max_cooccurrence_norm - max_cooccurrence_norm.mean()) / (max_cooccurrence_norm.std() + 1e-6)
 
         # Clip prices to be strictly in (0, 1) for Beta distribution
         # Beta distribution requires values strictly between 0 and 1
@@ -195,18 +168,16 @@ class TimeDiscountingModel:
             'n_categories': len(self.categories),
             'n_events': len(event_ids_col),
             'n_obs': len(latest_prices),
-            # Signals
+            # Signals (kept for model)
             'ts_level': latest_prices['ts_level'].values,
             'ts_slope': latest_prices['ts_slope'].values,
             'ts_curvature': latest_prices['ts_curvature'].values,
             'implied_rate': latest_prices['implied_rate'].values,
             'volume_normalized': volume_normalized.values,
             'time_to_expiration': latest_prices['time_to_expiration'].fillna(0).values,
-            # Cooccurrence features (SLUG-BASED)
-            'token_count_norm': token_count_norm.values,
-            'avg_token_df_norm': avg_token_df_norm.values,
-            'max_cooccurrence_norm': max_cooccurrence_norm.values,
-            'token_diversity': latest_prices['token_diversity'].values,
+            # Semantic grouping (kept for structure)
+            # - category_idx: which category (politics, crypto, sports, etc.)
+            # - event_idx: which semantic group (learned event-level parameters)
             # For predictions
             'event_groups': latest_prices[group_col].values,
             'questions': latest_prices['question'].values
@@ -245,8 +216,7 @@ class TimeDiscountingModel:
             # ========================================
             # SIGNAL EFFECTS
             # ========================================
-            # Term structure effects
-            β_ts_level = pm.Normal('β_ts_level', mu=0, sigma=1)
+            # Term structure effects (slope and curvature describe curve shape)
             β_ts_slope = pm.Normal('β_ts_slope', mu=0, sigma=1)
             β_ts_curvature = pm.Normal('β_ts_curvature', mu=0, sigma=1)
 
@@ -258,11 +228,6 @@ class TimeDiscountingModel:
             # For exponential: D(t) = exp(-k*t)
             β_discount = pm.HalfNormal('β_discount', sigma=1)
 
-            # SLUG-BASED COOCCURRENCE FEATURE COEFFICIENTS
-            β_token_count = pm.Normal('β_token_count', mu=0, sigma=1)
-            β_avg_token_df = pm.Normal('β_avg_token_df', mu=0, sigma=1)
-            β_max_cooccurrence = pm.Normal('β_max_cooccurrence', mu=0, sigma=1)
-            β_token_diversity = pm.Normal('β_token_diversity', mu=0, sigma=1)
 
             # ========================================
             # VOLUME-BASED CONCENTRATION
@@ -296,15 +261,9 @@ class TimeDiscountingModel:
             # Clip to keep away from extreme values that cause numerical issues
             μ_obs_raw = pm.math.invlogit(  # Map to [0, 1]
                 μ_event +
-                β_ts_level * data['ts_level'] +
                 β_ts_slope * data['ts_slope'] +
                 β_ts_curvature * data['ts_curvature'] +
                 β_implied_rate * data['implied_rate'] +
-                # SLUG-BASED COOCCURRENCE FEATURES
-                β_token_count * data['token_count_norm'] +
-                β_avg_token_df * data['avg_token_df_norm'] +
-                β_max_cooccurrence * data['max_cooccurrence_norm'] +
-                β_token_diversity * data['token_diversity'] +
                 pm.math.log(discount + 1e-6)  # Discount effect
             )
             # Ensure μ_obs is strictly in (0, 1) for Beta distribution stability
