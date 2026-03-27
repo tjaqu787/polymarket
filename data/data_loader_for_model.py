@@ -362,7 +362,7 @@ class PolymarketDataLoader:
         # Merge to get resolution dates and other market metadata
         # Don't include market_id in the merge since price_df already has it
         df = price_df.merge(
-            market_df[['token_id', 'resolution_date', 'event_slug', 'event_title', 'question', 'category', 'volume_num', 'liquidity_num']],
+            market_df[['token_id', 'semantic_group_id', 'resolution_date', 'event_slug', 'event_title', 'question', 'category', 'volume_num', 'liquidity_num']],
             on='token_id',
             how='left'
         )

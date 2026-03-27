@@ -90,7 +90,8 @@ class TimeDiscountingStrategy(Strategy):
             print(f"Training window: {train_start.date()} to {train_end.date()}")
 
             # Load training data (resolved markets only)
-            rates_df, resolved_df, text_features = self.data_loader.load_full_dataset(
+            # Returns: (rates_df, ts_metrics_df, resolved_df)
+            rates_df, _, resolved_df = self.data_loader.load_full_dataset(
                 resolved_only=True,
                 start_date=train_start.strftime('%Y-%m-%d'),
                 end_date=train_end_date,
@@ -159,7 +160,8 @@ class TimeDiscountingStrategy(Strategy):
 
         try:
             # Load active markets for prediction date
-            rates_df, resolved_df, _ = self.data_loader.load_full_dataset(
+            # Returns: (rates_df, ts_metrics_df, resolved_df)
+            rates_df, _, resolved_df = self.data_loader.load_full_dataset(
                 active_only=True,
                 start_date=predict_date,
                 end_date=predict_date,
