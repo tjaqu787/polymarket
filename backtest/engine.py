@@ -65,7 +65,7 @@ class BacktestEngine:
         market_ids: Optional[List[str]] = None,
         event_ids: Optional[List[str]] = None,
         use_timing_markets: bool = True,
-        min_volume: float = 100
+        min_volume: float = 0
     ) -> Dict:
         """
         Run backtest over specified date range and markets.
@@ -90,7 +90,6 @@ class BacktestEngine:
             self.data = self.data_loader.load_timing_markets(
                 start_date=start_date,
                 end_date=end_date,
-                min_volume=min_volume
             )
         else:
             self.data = self.data_loader.load_market_data(
@@ -98,7 +97,6 @@ class BacktestEngine:
                 event_ids=event_ids,
                 start_date=start_date,
                 end_date=end_date,
-                min_volume=min_volume
             )
 
         if self.data.empty:

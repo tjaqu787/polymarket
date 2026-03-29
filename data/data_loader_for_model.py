@@ -461,7 +461,7 @@ class PolymarketDataLoader:
                          active_only: bool = False,
                          resolved_only: bool = False,
                          min_markets_per_group: int = 2,
-                         outcome: str = 'Yes',
+                         outcome: str = 'No',
                          start_date: Optional[str] = None,
                          end_date: Optional[str] = None,
                          use_semantic_groups: bool = True,
@@ -473,7 +473,7 @@ class PolymarketDataLoader:
             active_only: Only include active markets
             resolved_only: Only include resolved markets
             min_markets_per_group: Minimum markets per event group
-            outcome: Outcome to calculate term structure for
+            outcome: Outcome to calculate term structure for (default 'No' for timing markets)
             start_date: Optional start date filter
             end_date: Optional end date filter
             use_semantic_groups: Use semantic_group_id for grouping (default True)
