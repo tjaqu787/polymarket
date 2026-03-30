@@ -1,3 +1,6 @@
+### RUN THIS TO SUMMARIZE THE .NC POSTERIORS FROM ADVI AND NUTS
+
+
 import arviz as az
 import numpy as np
 from pathlib import Path
