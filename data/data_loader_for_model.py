@@ -52,7 +52,8 @@ class PolymarketDataLoader:
     def get_market_data(self,
                        active_only: bool = False,
                        resolved_only: bool = False,
-                       min_markets_per_group: int = 2) -> pd.DataFrame:
+                       min_markets_per_group: int = 2,
+                       use_semantic_groups: bool = True) -> pd.DataFrame:
         """
         Load market data from bets_for_timing_view.
 
@@ -60,6 +61,8 @@ class PolymarketDataLoader:
             active_only: Only include active markets
             resolved_only: Only include resolved markets
             min_markets_per_group: Minimum number of markets per event group
+            use_semantic_groups: Use semantic_group_id for grouping (default True)
+                                If False, uses event_id (old behavior)
 
         Returns:
             DataFrame with market metadata including slugs
@@ -70,6 +73,9 @@ class PolymarketDataLoader:
             SELECT
                 market_id,
                 event_id AS market_group,
+                semantic_group_id,
+                canonical_slug,
+                actor,
                 token_id,
                 outcome,
                 token_index,
@@ -103,11 +109,14 @@ class PolymarketDataLoader:
         df = pd.read_sql_query(query, conn)
         conn.close()
 
+        # Choose grouping column
+        group_col = 'semantic_group_id' if use_semantic_groups else 'market_group'
+
         # Filter by minimum markets per group
         if min_markets_per_group > 1:
-            market_counts = df.groupby('market_group')['market_id'].nunique()
+            market_counts = df.groupby(group_col)['market_id'].nunique()
             valid_groups = market_counts[market_counts >= min_markets_per_group].index
-            df = df[df['market_group'].isin(valid_groups)]
+            df = df[df[group_col].isin(valid_groups)]
 
         return df
 
@@ -381,21 +390,28 @@ class PolymarketDataLoader:
 
     def calculate_term_structure_metrics(self,
                                         rates_df: pd.DataFrame,
-                                        outcome: str = 'Yes') -> pd.DataFrame:
+                                        outcome: str = 'Yes',
+                                        group_by: str = 'semantic_group_id') -> pd.DataFrame:
         """
-        Calculate term structure metrics for each date and event.
+        Calculate term structure metrics for each date and group.
 
         Args:
             rates_df: DataFrame with implied rates (from calculate_implied_rates)
             outcome: Which outcome to calculate term structure for ('Yes' or 'No')
+            group_by: Column to group by ('semantic_group_id' or 'event_id')
 
         Returns:
             DataFrame with date, market_group, and term structure metrics
         """
         metrics_list = []
 
-        # Group by event and date
-        for (event_id, date), group in rates_df.groupby(['event_id', 'date']):
+        # Use semantic_group_id if available, otherwise fall back to event_id
+        if group_by not in rates_df.columns:
+            print(f"Warning: {group_by} not found, falling back to event_id")
+            group_by = 'event_id'
+
+        # Group by chosen column and date
+        for (group_id, date), group in rates_df.groupby([group_by, 'date']):
             # Filter to specific outcome
             outcome_group = group[group['outcome'] == outcome].copy()
 
@@ -428,7 +444,7 @@ class PolymarketDataLoader:
 
             metrics_list.append({
                 'date': date,
-                'market_group': event_id,
+                'market_group': group_id,
                 'outcome': outcome,
                 'ts_level': level,
                 'ts_slope': slope,
@@ -447,7 +463,9 @@ class PolymarketDataLoader:
                          min_markets_per_group: int = 2,
                          outcome: str = 'Yes',
                          start_date: Optional[str] = None,
-                         end_date: Optional[str] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                         end_date: Optional[str] = None,
+                         use_semantic_groups: bool = True,
+                         load_token_features: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """
         Load complete dataset with prices, implied rates, and term structure metrics.
 
@@ -458,6 +476,8 @@ class PolymarketDataLoader:
             outcome: Outcome to calculate term structure for
             start_date: Optional start date filter
             end_date: Optional end date filter
+            use_semantic_groups: Use semantic_group_id for grouping (default True)
+            load_token_features: Load token cooccurrence features (default False, not used by model)
 
         Returns:
             Tuple of (price_data_with_rates, term_structure_metrics, resolved_outcomes)
@@ -466,9 +486,14 @@ class PolymarketDataLoader:
         market_df = self.get_market_data(
             active_only=active_only,
             resolved_only=resolved_only,
-            min_markets_per_group=min_markets_per_group
+            min_markets_per_group=min_markets_per_group,
+            use_semantic_groups=use_semantic_groups
         )
-        print(f"Loaded {len(market_df)} markets in {market_df['market_group'].nunique()} event groups")
+
+        # Choose grouping column
+        group_col = 'semantic_group_id' if use_semantic_groups else 'market_group'
+
+        print(f"Loaded {len(market_df)} markets in {market_df[group_col].nunique()} groups ({group_col})")
 
         print("\nLoading price data...")
         event_ids = market_df['market_group'].unique().tolist()
@@ -488,46 +513,50 @@ class PolymarketDataLoader:
         print(f"Calculated implied rates for {len(rates_df)} price points")
 
         print("\nCalculating term structure metrics...")
-        ts_metrics_df = self.calculate_term_structure_metrics(rates_df, outcome=outcome)
+        ts_metrics_df = self.calculate_term_structure_metrics(rates_df, outcome=outcome, group_by=group_col)
         print(f"Calculated term structure metrics for {len(ts_metrics_df)} date-event combinations")
 
         # Merge term structure metrics back into rates_df
-        # ts_metrics uses 'market_group', but rates_df has 'event_id', so we need to align
+        # ts_metrics uses 'market_group' column but the value is from group_col
         if len(ts_metrics_df) > 0:
             rates_df = rates_df.merge(
                 ts_metrics_df,
-                left_on=['date', 'event_id'],
+                left_on=['date', group_col],
                 right_on=['date', 'market_group'],
                 how='left'
             )
-            # Drop duplicate column
-            if 'market_group' in rates_df.columns:
+            # Drop duplicate market_group column if it was created by merge
+            if 'market_group' in rates_df.columns and 'market_group' != group_col:
                 rates_df = rates_df.drop(columns=['market_group'])
 
-        print("\nLoading text token features...")
-        market_ids = market_df['market_id'].unique().tolist()
-        token_features_df = self.get_token_features(market_ids=market_ids)
-        if len(token_features_df) > 0:
-            print(f"Loaded token features for {len(token_features_df)} markets")
-            rates_df = rates_df.merge(
-                token_features_df,
-                on='market_id',
-                how='left'
-            )
-        else:
-            print("No token features found (tables may not exist)")
+        # Token cooccurrence features (optional, not used by default model)
+        if load_token_features:
+            print("\nLoading text token features...")
+            market_ids = market_df['market_id'].unique().tolist()
+            token_features_df = self.get_token_features(market_ids=market_ids)
+            if len(token_features_df) > 0:
+                print(f"Loaded token features for {len(token_features_df)} markets")
+                rates_df = rates_df.merge(
+                    token_features_df,
+                    on='market_id',
+                    how='left'
+                )
+            else:
+                print("No token features found (tables may not exist)")
 
-        print("\nLoading token cooccurrence features...")
-        cooccurrence_features_df = self.get_cooccurrence_features(market_ids=market_ids)
-        if len(cooccurrence_features_df) > 0:
-            print(f"Loaded cooccurrence features for {len(cooccurrence_features_df)} markets")
-            rates_df = rates_df.merge(
-                cooccurrence_features_df,
-                on='market_id',
-                how='left'
-            )
+            print("\nLoading token cooccurrence features...")
+            cooccurrence_features_df = self.get_cooccurrence_features(market_ids=market_ids)
+            if len(cooccurrence_features_df) > 0:
+                print(f"Loaded cooccurrence features for {len(cooccurrence_features_df)} markets")
+                rates_df = rates_df.merge(
+                    cooccurrence_features_df,
+                    on='market_id',
+                    how='left'
+                )
+            else:
+                print("No cooccurrence features found (tables may not exist)")
         else:
-            print("No cooccurrence features found (tables may not exist)")
+            print("\nSkipping token cooccurrence features (not used by model)")
 
         print("\nLoading resolved outcomes...")
         resolved_df = self.get_resolved_outcomes(event_ids=event_ids)

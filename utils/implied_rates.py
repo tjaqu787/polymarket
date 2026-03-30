@@ -1,13 +1,18 @@
 """
-Calculate implied continuous interest rates from Polymarket probabilities.
+Calculate implied hazard rates from Polymarket probabilities.
 
-The implied rate formula is:
-    r = -ln(p) / T
+Models prediction market prices as cumulative probabilities in a Poisson process:
+    P(T) = 1 - e^(-λT)
 
 Where:
-    p = probability (price)
+    P(T) = probability event occurs by time T (market price)
     T = time to expiration in years
-    r = implied continuous interest rate (annual)
+    λ = hazard rate / intensity function (what we're solving for)
+
+Solving for λ:
+    λ = -ln(1 - P(T)) / T
+
+This gives the implied rate at which the event is "happening" per unit time.
 """
 
 import sqlite3
@@ -48,14 +53,17 @@ def calculate_time_to_expiration(current_date: str, resolution_date: str) -> flo
 
 def calculate_implied_rate(probability: float, time_to_expiration: float) -> float:
     """
-    Calculate implied continuous interest rate.
+    Calculate implied hazard rate from a prediction market price.
+
+    Models the market price as P(T) = 1 - e^(-λT) where λ is the hazard rate.
+    Solves for λ = -ln(1 - P(T)) / T
 
     Args:
-        probability: Market probability (0 to 1)
+        probability: Market probability (0 to 1) - probability event occurs by time T
         time_to_expiration: Time to expiration in years
 
     Returns:
-        Implied continuous interest rate (annual)
+        Implied hazard rate λ (annual rate at which event "happens")
     """
     if probability <= 0 or probability >= 1:
         return np.nan
@@ -63,29 +71,36 @@ def calculate_implied_rate(probability: float, time_to_expiration: float) -> flo
     if time_to_expiration <= 0:
         return np.nan
 
-    # r = -ln(p) / T
-    rate = -np.log(probability) / time_to_expiration
+    # λ = -ln(1 - P(T)) / T
+    # This is the hazard rate for a Poisson process
+    rate = -np.log(1 - probability) / time_to_expiration
 
     return rate
 
 
-def load_price_history(db_path: str = "data/polymarket.db", market_group: str = None) -> pd.DataFrame:
+def load_price_history(db_path: str = "data/polymarket.db", market_group: str = None, use_semantic_groups: bool = True) -> pd.DataFrame:
     """
     Load price history for markets, optionally filtered by market_group.
 
     Args:
         db_path: Path to SQLite database
-        market_group: Optional market_group (event_id) to filter by
+        market_group: Optional market_group (semantic_group_id or event_id) to filter by
+        use_semantic_groups: Use semantic_group_id (default True) or event_id
 
     Returns:
         DataFrame with price history and market metadata
     """
     conn = sqlite3.connect(db_path)
 
-    query = """
+    group_col = "semantic_group_id" if use_semantic_groups else "event_id"
+
+    query = f"""
         SELECT
             ph.market_id,
-            ph.event_id AS market_group,
+            ph.event_id AS event_id,
+            bv.semantic_group_id,
+            bv.canonical_slug,
+            bv.actor,
             ph.token_id,
             ph.outcome,
             ph.ts,
@@ -102,12 +117,18 @@ def load_price_history(db_path: str = "data/polymarket.db", market_group: str = 
     """
 
     if market_group:
-        query += f" WHERE ph.event_id = '{market_group}'"
+        query += f" WHERE bv.{group_col} = '{market_group}'"
 
-    query += " ORDER BY ph.event_id, ph.market_id, ph.outcome, ph.ts"
+    query += f" ORDER BY bv.{group_col}, ph.market_id, ph.outcome, ph.ts"
 
     df = pd.read_sql_query(query, conn)
     conn.close()
+
+    # Add market_group column pointing to the appropriate grouping
+    if use_semantic_groups:
+        df['market_group'] = df['semantic_group_id']
+    else:
+        df['market_group'] = df['event_id']
 
     return df
 
@@ -147,26 +168,35 @@ def calculate_implied_rates_for_market_group(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def get_market_groups(db_path: str = "data/polymarket.db") -> pd.DataFrame:
+def get_market_groups(db_path: str = "data/polymarket.db", use_semantic_groups: bool = True) -> pd.DataFrame:
     """
     Get list of all market groups with metadata.
+
+    Args:
+        db_path: Path to database
+        use_semantic_groups: Use semantic_group_id (default True) or event_id
 
     Returns:
         DataFrame with market_group, event_slug, event_title, and count of markets
     """
     conn = sqlite3.connect(db_path)
 
-    query = """
+    group_col = "semantic_group_id" if use_semantic_groups else "market_group"
+
+    query = f"""
         SELECT
-            market_group,
-            event_slug,
-            event_title,
+            {group_col} as market_group,
+            MAX(event_slug) as event_slug,
+            MAX(event_title) as event_title,
+            MAX(canonical_slug) as canonical_slug,
+            MAX(actor) as actor,
             COUNT(DISTINCT market_id) AS num_markets,
             COUNT(DISTINCT resolution_date) AS num_dates,
             MIN(resolution_date) AS earliest_date,
             MAX(resolution_date) AS latest_date
         FROM bets_for_timing_view
-        GROUP BY market_group, event_slug, event_title
+        WHERE {group_col} IS NOT NULL
+        GROUP BY {group_col}
         HAVING num_dates > 1
         ORDER BY num_dates DESC, num_markets DESC
     """

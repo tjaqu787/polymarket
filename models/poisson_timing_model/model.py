@@ -181,6 +181,84 @@ class PoissonTimingModel:
         elif self.distribution == 'gamma':
             return gamma.cdf(times, params['shape'], 0, params['scale'])
 
+    def calculate_credible_intervals(self,
+                                     times: np.ndarray,
+                                     cdf_values: np.ndarray,
+                                     eval_times: np.ndarray,
+                                     ci_level: float = 0.70,
+                                     n_bootstrap: int = 1000) -> Dict:
+        """
+        Calculate credible intervals for the CDF using bootstrap.
+
+        Args:
+            times: Original time points
+            cdf_values: Original CDF values
+            eval_times: Time points to evaluate CDF and get intervals
+            ci_level: Credible interval level (0.70 for 70% CI)
+            n_bootstrap: Number of bootstrap samples
+
+        Returns:
+            Dictionary with 'lower', 'upper', 'median' CDF values
+        """
+        # Convert CDF to PDF
+        time_midpoints, pdf_values = self.cdf_to_pdf(times, cdf_values)
+
+        bootstrap_cdfs = []
+
+        for _ in range(n_bootstrap):
+            # Sample with replacement from the implied distribution
+            n_samples = 10000
+            sample_times = np.random.choice(
+                time_midpoints,
+                size=n_samples,
+                replace=True,
+                p=pdf_values / pdf_values.sum()
+            )
+
+            # Fit distribution to bootstrap sample
+            try:
+                if self.distribution == 'exponential':
+                    lambda_hat = 1 / np.mean(sample_times)
+                    boot_cdf = 1 - np.exp(-lambda_hat * eval_times)
+
+                elif self.distribution == 'weibull':
+                    shape, loc, scale = weibull_min.fit(sample_times, floc=0)
+                    boot_cdf = weibull_min.cdf(eval_times, shape, 0, scale)
+
+                elif self.distribution == 'gamma':
+                    shape, loc, scale = gamma.fit(sample_times, floc=0)
+                    boot_cdf = gamma.cdf(eval_times, shape, 0, scale)
+
+                bootstrap_cdfs.append(boot_cdf)
+            except:
+                # Skip failed fits
+                continue
+
+        if len(bootstrap_cdfs) == 0:
+            # Fallback: return point estimates with no interval
+            fit_result = self.fit_mle(times, cdf_values)
+            point_cdf = self._calculate_fitted_cdf(eval_times, fit_result['params'])
+            return {
+                'lower': point_cdf,
+                'upper': point_cdf,
+                'median': point_cdf,
+                'times': eval_times
+            }
+
+        bootstrap_cdfs = np.array(bootstrap_cdfs)
+
+        # Calculate percentiles
+        alpha = (1 - ci_level) / 2
+        lower_percentile = alpha * 100
+        upper_percentile = (1 - alpha) * 100
+
+        return {
+            'lower': np.percentile(bootstrap_cdfs, lower_percentile, axis=0),
+            'upper': np.percentile(bootstrap_cdfs, upper_percentile, axis=0),
+            'median': np.percentile(bootstrap_cdfs, 50, axis=0),
+            'times': eval_times
+        }
+
     def build_bayesian_model(self,
                             times: np.ndarray,
                             cdf_values: np.ndarray) -> pm.Model:
