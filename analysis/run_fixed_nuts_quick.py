@@ -28,8 +28,8 @@ def main():
 
     # subsample for speed (still plenty to confirm sign/magnitude)
     np.random.seed(0)
-    if len(long) > 6000:
-        long = long.sample(n=6000, random_state=0).reset_index(drop=True)
+    if len(long) > 2500:
+        long = long.sample(n=2500, random_state=0).reset_index(drop=True)
 
     h_map = {"30d": 0, "7d": 1, "1d": 2}
     h_idx = long["horizon"].map(h_map).values
@@ -51,7 +51,7 @@ def main():
         mu_obs = mu + delta[h_idx] + u_slug[slug_idx]
         pm.Normal("y", mu_obs, sigma, observed=y)
 
-        idata = pm.sample(draws=200, tune=200, chains=1, cores=1, target_accept=0.9)
+        idata = pm.sample(draws=100, tune=100, chains=1, cores=1, target_accept=0.9, progressbar=True)
 
     az.to_netcdf(idata, "analysis/lambda_model_fixed_nuts_quick.nc")
     print(az.summary(idata, var_names=["delta_7","delta_1","sigma_slug","sigma_delta","sigma"]))
