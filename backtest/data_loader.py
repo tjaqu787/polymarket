@@ -134,8 +134,7 @@ class DataLoader:
         self,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        min_volume: float = 100,
-        use_semantic_groups: bool = True
+        use_semantic_groups: bool = False
     ) -> pd.DataFrame:
         """
         Load timing-based prediction markets (uses bets_for_timing_view).
@@ -171,11 +170,12 @@ class DataLoader:
             ph.ts,
             ph.price
         FROM bets_for_timing_view bft
-        JOIN price_history ph ON bft.token_id = ph.token_id
-        WHERE bft.volume_num >= ?
+        JOIN price_history ph 
+        ON bft.token_id = ph.token_id
+        WHERE 1=1
         """
 
-        params = [min_volume]
+        params = []
 
         if start_date:
             query += " AND ph.date >= ?"
