@@ -181,10 +181,20 @@ class FactoredGammaModel:
         Implementation:
             1. Extract term structure from event_data
             2. Validate (≥ min_buckets points, times strictly increasing)
-            3. Fit base Gamma via GammaCDFFitter
+            3. Fit base Gamma via GammaCDFFitter (MLE, refits from scratch)
             4. Apply factor adjustments via FactorAdjustment
             5. Compute credible intervals using ADJUSTED parameters
             6. Return FitResult with all parameters and CI bounds
+
+        Note on Refitting:
+            Each call refits from scratch via MLE (frequentist approach).
+            This is NOT Bayesian sequential updating:
+            - Estimates (α, β) via maximum likelihood on current data
+            - Does NOT use previous fit as prior
+            - Bootstrap provides frequentist confidence intervals
+
+            For true Bayesian refitting: use previous posterior as new prior,
+            update via MCMC (PyMC), get credible intervals from posterior samples.
         """
         # Extract term structure
         try:

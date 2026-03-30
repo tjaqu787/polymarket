@@ -33,7 +33,7 @@ config = {
     "ci_level": 0.70,              # 70% credible interval
     "min_buckets": 3,               # Min term structure points
     "max_rmse": 0.3,                # Max fit error threshold
-    "refit_days": 7,                # Refit model every 7 days
+    "refit_hours": 6,               # Refit model every 6 hours (adaptive to data)
     "n_bootstrap": 500,             # Bootstrap samples for CI calculation
     "max_event_exposure": 0.15,     # 15% of portfolio per event
     "eb_holdout_end_date": "2025-10-05",  # Empirical Bayes cutoff date
@@ -52,7 +52,8 @@ print(f"Backtest Period:       2025-11-05 to 2026-03-16")
 print(f"Initial Capital:       $10,000")
 print(f"Max Event Exposure:    {config['max_event_exposure']*100:.0f}%")
 print(f"CI Level:              {config['ci_level']*100:.0f}%")
-print(f"Refit Interval:        {config['refit_days']} days")
+print(f"Refit Interval:        {config['refit_hours']} hours")
+print(f"Fitting Method:        MLE + Bootstrap (frequentist)")
 print(f"{'='*70}\n")
 
 engine = BacktestEngine(
