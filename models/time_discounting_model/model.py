@@ -145,9 +145,22 @@ class TimeDiscountingModel:
         latest_prices['event_idx'] = latest_prices[group_col].map(event_map)
 
         # Fill NaNs in features with reasonable defaults
-        latest_prices['ts_level'] = latest_prices['ts_level'].fillna(0)
-        latest_prices['ts_slope'] = latest_prices['ts_slope'].fillna(0)
-        latest_prices['ts_curvature'] = latest_prices['ts_curvature'].fillna(0)
+        # Create columns if they don't exist (happens when term structure can't be calculated)
+        if 'ts_level' not in latest_prices.columns:
+            latest_prices['ts_level'] = 0
+        else:
+            latest_prices['ts_level'] = latest_prices['ts_level'].fillna(0)
+
+        if 'ts_slope' not in latest_prices.columns:
+            latest_prices['ts_slope'] = 0
+        else:
+            latest_prices['ts_slope'] = latest_prices['ts_slope'].fillna(0)
+
+        if 'ts_curvature' not in latest_prices.columns:
+            latest_prices['ts_curvature'] = 0
+        else:
+            latest_prices['ts_curvature'] = latest_prices['ts_curvature'].fillna(0)
+
         latest_prices['implied_rate'] = latest_prices['implied_rate'].fillna(0)
         latest_prices['volume_num'] = latest_prices['volume_num'].fillna(0)
 

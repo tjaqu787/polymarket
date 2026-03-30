@@ -1,0 +1,287 @@
+BAYESIAN GAMMA TIMING MODEL - Implementation Instructions
+=========================================================
+
+Goal: Implement TRUE Bayesian sequential updating for the Gamma timing model
+- Use PyMC for MCMC sampling (not MLE)
+- Store posterior samples from previous fits
+- Use previous posterior as informative prior for next fit
+- Proper Bayesian credible intervals from posterior samples
+
+Key Difference from Factored Gamma Model:
+- Factored: MLE + bootstrap (frequentist, refits from scratch)
+- Bayesian: MCMC + sequential updating (posterior → prior chaining)
+
+=============================================================================
+IMPLEMENTATION CHECKLIST
+=============================================================================
+
+[X] 1. CORE BAYESIAN FITTER (bayesian_gamma_fitter.py) ✓ COMPLETE
+
+    Purpose: Fit Gamma(α, β) using PyMC MCMC, support sequential updating
+
+    Key Methods:
+    - fit_initial(times, cdf_values) → posterior samples
+        * First fit: use weakly informative priors
+        * Sample from implied PDF (like MLE version)
+        * PyMC model: α ~ HalfNormal(5, 3), β ~ HalfNormal(1, 2)
+        * NUTS sampling: 500 draws × 2 chains
+        * Return: InferenceData with posterior samples
+
+    - fit_sequential(times, cdf_values, prior_samples) → posterior samples
+        * Sequential fit: use previous posterior as new prior
+        * Approximate prior from samples (kernel density or parametric fit)
+        * Use as informative prior for α, β
+        * NUTS sampling on new data
+        * Return: InferenceData with updated posterior
+
+    - predict_cdf(times, posterior_samples) → Dict[lower, upper, median]
+        * For each posterior sample: compute Gamma CDF
+        * Return percentiles across posterior predictive samples
+
+    Implementation Details:
+    - Use pymc.sample_prior_predictive() to sample from implied PDF
+    - Likelihood: compare predicted CDF to observed CDF (Normal error)
+    - Store trace as arviz InferenceData
+    - For sequential: fit Normal/Gamma to previous α, β samples as prior
+
+[X] 2. POSTERIOR STORAGE (posterior_store.py) ✓ COMPLETE
+
+    Purpose: Manage storage of posterior samples for sequential updating
+
+    Key Classes:
+    - PosteriorStore
+        * save_posterior(event_id, date, idata)
+        * load_latest_posterior(event_id) → (date, idata)
+        * has_prior(event_id) → bool
+
+    Storage Format:
+    - Save as NetCDF: {event_id}_{timestamp}.nc
+    - Keep only latest N posteriors per event (default: 5)
+    - Directory: models/bayesian_gamma_model/posteriors/
+
+    Edge Cases:
+    - First fit for event: return None (use default priors)
+    - Corrupted file: log error, return None
+    - Old posteriors: auto-cleanup (keep last 5)
+
+[X] 3. MAIN MODEL CLASS (model.py) ✓ COMPLETE
+
+    Purpose: Orchestrate Bayesian fitting with sequential updates
+
+    Key Classes:
+    - BayesianGammaModel
+        * fit_event(event_data, current_date, event_id) → FitResult
+            - Check if posterior exists for this event
+            - If yes: fit_sequential() with prior from storage
+            - If no: fit_initial() with default priors
+            - Save new posterior to storage
+            - Return FitResult with posterior samples
+
+        * predict(market_id, fit_result, current_date) → PredictionResult
+            - Extract CI bounds from posterior predictive
+            - Return prediction with interval_width
+
+    FitResult Structure:
+    - event_id, fit_date
+    - posterior_samples (arviz InferenceData)
+    - credible_intervals (per market)
+    - alpha_mean, beta_mean (posterior means)
+    - rmse, aic
+
+    Key Difference:
+    - Store full posterior (not just point estimates)
+    - CI from posterior samples (not bootstrap)
+
+[ ] 4. FACTOR ADJUSTMENTS (Optional - reuse from factored_gamma_model)
+
+    Decision: Reuse empirical_bayes.py and factor_adjustment.py
+    - Apply factor adjustments AFTER getting base posterior
+    - Adjust posterior samples in log space
+    - α_adj[i] = exp(log(α[i]) + log_α_adjustment)
+    - β_adj[i] = exp(log(β[i]) + log_β_adjustment)
+
+    This keeps:
+    - Uncertainty quantification (full posterior)
+    - Category learning (Empirical Bayes factors)
+
+[ ] 5. TRADING STRATEGY (bayesian_gamma_strategy.py)
+
+    Purpose: Trading strategy using Bayesian model
+
+    Key Differences from FactoredGammaStrategy:
+    - Use BayesianGammaModel instead of FactoredGammaModel
+    - Refit every 6 hours (sequential updating)
+    - CI bounds from posterior (not bootstrap)
+    - Position sizing still based on interval_width
+
+    Configuration:
+    - refit_hours: 6
+    - mcmc_draws: 500
+    - mcmc_chains: 2
+    - ci_level: 0.70
+    - max_event_exposure: 0.15
+
+[ ] 6. BACKTEST SCRIPT (run_bayesian_gamma_backtest.py)
+
+    Purpose: Run backtest with Bayesian model
+
+    Config:
+    - Same date range as factored_gamma (2025-11-05 to 2026-03-16)
+    - Refit every 6 hours
+    - Save trades to backtest_results/bayesian_gamma_trades.csv
+
+    Performance Comparison:
+    - Compare to Factored Gamma (frequentist)
+    - Does sequential updating improve performance?
+    - Are CI widths more realistic?
+
+[ ] 7. TESTING (test_bayesian_gamma_model.py)
+
+    Test Cases:
+    - BayesianGammaFitter.fit_initial(): recovers known params from synthetic data
+    - BayesianGammaFitter.fit_sequential(): posterior narrows with more data
+    - PosteriorStore: save/load/cleanup
+    - BayesianGammaModel: sequential updating works
+    - Integration: full pipeline on real event
+
+[X] 8. PACKAGE SETUP (__init__.py) ✓ COMPLETE
+
+    Exports:
+    - BayesianGammaModel
+    - BayesianGammaFitter
+    - PosteriorStore
+    - FitResult, PredictionResult
+
+=============================================================================
+IMPLEMENTATION NOTES
+=============================================================================
+
+PyMC Model Structure:
+```python
+with pm.Model() as model:
+    # Priors (informative if sequential, weakly informative if initial)
+    alpha = pm.HalfNormal('alpha', mu=alpha_prior_mu, sigma=alpha_prior_sigma)
+    beta = pm.HalfNormal('beta', mu=beta_prior_mu, sigma=beta_prior_sigma)
+
+    # Likelihood: fit to implied samples from CDF
+    # Sample from PDF, then fit Gamma likelihood
+    pm.Gamma('obs', alpha=alpha, beta=beta, observed=sample_times)
+
+    # Or alternative: fit CDF directly with Normal error
+    # predicted_cdf = pm_gamma_cdf(times, alpha, beta)
+    # pm.Normal('cdf_obs', mu=predicted_cdf, sigma=0.05, observed=cdf_values)
+
+    # Sample
+    idata = pm.sample(draws=500, tune=500, chains=2, target_accept=0.95)
+```
+
+Sequential Prior Construction:
+```python
+# Extract previous posterior samples
+prev_alpha = idata.posterior['alpha'].values.flatten()
+prev_beta = idata.posterior['beta'].values.flatten()
+
+# Fit parametric distribution (e.g., LogNormal)
+alpha_prior_mu = np.log(np.mean(prev_alpha))
+alpha_prior_sigma = np.std(np.log(prev_alpha))
+
+beta_prior_mu = np.log(np.mean(prev_beta))
+beta_prior_sigma = np.std(np.log(prev_beta))
+
+# Use as informative prior in next fit
+```
+
+Performance Considerations:
+- MCMC is slower than MLE (500 draws vs instant)
+- Use Haiku model for fitting if speed critical
+- Cache posteriors to avoid redundant computation
+- Only refit when data changes significantly
+
+Expected Benefits:
+- More realistic uncertainty quantification
+- Narrowing CI as event approaches (learning)
+- Better calibrated predictions
+- Principled incorporation of previous information
+
+Expected Costs:
+- Slower fitting (MCMC vs MLE)
+- More complex codebase
+- Storage overhead (posterior samples)
+- Potential convergence issues
+
+=============================================================================
+FILE STRUCTURE
+=============================================================================
+
+models/bayesian_gamma_model/
+├── __init__.py                      # Package exports
+├── bayesian_gamma_fitter.py         # Core MCMC fitting with PyMC
+├── posterior_store.py               # Save/load posterior samples
+├── model.py                         # Main BayesianGammaModel class
+├── posteriors/                      # Storage for posterior samples
+│   └── {event_id}_{timestamp}.nc
+└── instructions.txt                 # This file
+
+backtest/strategies/
+└── bayesian_gamma_strategy.py       # Trading strategy
+
+run_bayesian_gamma_backtest.py       # Backtest script
+tests/test_bayesian_gamma_model.py   # Test suite
+
+=============================================================================
+IMPLEMENTATION ORDER
+=============================================================================
+
+Phase 1: Core Bayesian Fitting
+1. bayesian_gamma_fitter.py - implement fit_initial() first
+2. Test on synthetic data (known α, β)
+3. Implement fit_sequential()
+4. Test that posterior narrows with more data
+
+Phase 2: Posterior Management
+5. posterior_store.py - implement save/load
+6. Test storage and retrieval
+
+Phase 3: Model Integration
+7. model.py - implement BayesianGammaModel
+8. Test on real event data
+9. Verify sequential updating works
+
+Phase 4: Strategy and Backtest
+10. bayesian_gamma_strategy.py - adapt from factored_gamma_strategy
+11. run_bayesian_gamma_backtest.py - backtest script
+12. Run and compare to factored_gamma baseline
+
+=============================================================================
+SUCCESS CRITERIA
+=============================================================================
+
+1. Posterior converges (R-hat < 1.01 for all params)
+2. Posterior narrows with sequential updates (decreasing σ)
+3. Credible intervals well-calibrated (70% CI contains true value ~70% of time)
+4. Performance comparable or better than factored_gamma
+5. CI widths realistic (reflect true uncertainty)
+
+=============================================================================
+CURRENT STATUS: Core Components Implemented
+=============================================================================
+
+COMPLETED:
+✓ [1] bayesian_gamma_fitter.py - fit_initial() and fit_sequential() implemented
+✓ [2] posterior_store.py - save/load/cleanup implemented
+✓ [3] model.py - BayesianGammaModel with sequential updating
+✓ [8] __init__.py - package exports
+
+REMAINING:
+[ ] [7] test_bayesian_gamma_model.py - test suite (optional)
+
+NEWLY COMPLETED:
+✓ [5] bayesian_gamma_strategy.py - trading strategy (WITH MULTITHREADING)
+✓ [6] run_bayesian_gamma_backtest.py - backtest script
+✓ Multithreading: mcmc_cores parameter passes through to PyMC (uses all 12 cores!)
+
+Next Steps:
+1. Run backtest: python run_bayesian_gamma_backtest.py
+2. Compare to factored_gamma baseline
+3. Verify sequential updating works (check posteriors directory)
+4. Monitor MCMC convergence (R-hat < 1.01)
