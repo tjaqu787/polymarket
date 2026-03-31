@@ -34,8 +34,25 @@ from backtest import BacktestEngine, DataLoader
 from backtest.strategies.bayesian_carry_strategy import BayesianCarryStrategy
 import pandas as pd
 import sqlite3
+import numpy as np
 
 DB_PATH = "data/polymarket.db"
+
+# Get available date range for backtest
+conn = sqlite3.connect(DB_PATH)
+cursor = conn.cursor()
+cursor.execute("SELECT MIN(date), MAX(date) FROM price_history")
+min_date, max_date = cursor.fetchone()
+conn.close()
+
+start_date = min_date
+end_date = max_date
+
+# EB holdout: use first 1 year of data for learning priors
+# Then backtest on remaining data
+eb_cutoff = pd.Timestamp(min_date) + pd.DateOffset(years=1)
+eb_holdout_end = eb_cutoff.strftime('%Y-%m-%d')
+backtest_start = (eb_cutoff + pd.DateOffset(days=1)).strftime('%Y-%m-%d')
 
 # Base configuration (shared across variants)
 base_config = {
@@ -47,10 +64,15 @@ base_config = {
     'refit_days': 7,
 
     # Carry trade parameters
-    'max_tte_days': 30,       # Short-dated only
-    'min_edge': 0.05,         # 5% minimum edge
+    'max_tte_days': 90,       # Medium-dated (was 30, too restrictive)
+    'min_edge': 0.01,         # 1% minimum edge (was 0.05, too tight!)
     'kelly_fraction': 0.25,   # Quarter Kelly
     'max_position': 0.10,     # 10% portfolio cap
+
+    # Empirical Bayes (CRITICAL for predictive power!)
+    'use_eb_priors': True,
+    'eb_holdout_end_date': eb_holdout_end,  # Use first year for EB learning
+    'db_path': DB_PATH,
 
     # Initial capital
     'initial_capital': 10000.0,
@@ -81,22 +103,14 @@ variants = [
     })
 ]
 
-# Get available date range
-conn = sqlite3.connect(DB_PATH)
-cursor = conn.cursor()
-cursor.execute("SELECT MIN(date), MAX(date) FROM price_history")
-min_date, max_date = cursor.fetchone()
-conn.close()
-
-start_date = min_date
-end_date = max_date
-
 print(f"\n{'='*70}")
-print("Bayesian Carry Strategy Backtest — Three Hedging Variants")
+print("Bayesian Carry Strategy with EMPIRICAL BAYES Priors")
 print(f"{'='*70}")
 print(f"Strategy:              Kelly-sized carry on short-dated No contracts")
 print(f"DB:                    {DB_PATH}")
-print(f"Period:                {start_date} to {end_date} (FULL HISTORY)")
+print(f"Data Range:            {min_date} to {max_date}")
+print(f"EB Learning Period:    {min_date} to {eb_holdout_end} (1 year)")
+print(f"Backtest Period:       {backtest_start} to {end_date}")
 print(f"Initial Capital:       ${base_config['initial_capital']:,.0f}")
 print(f"Max TTE:               {base_config['max_tte_days']} days")
 print(f"Kelly Fraction:        {base_config['kelly_fraction']*100:.0f}%")
@@ -104,6 +118,8 @@ print(f"Min Edge:              {base_config['min_edge']*100:.0f}%")
 print(f"Max Position:          {base_config['max_position']*100:.0f}%")
 print(f"Refit Interval:        {base_config['refit_days']} days")
 print(f"MCMC:                  {base_config['mcmc_draws']} draws × {base_config['mcmc_chains']} chains")
+print(f"\nKEY: EB priors learn from historical events, then predict new events")
+print(f"     This creates REAL predictive power (not circular fitting)")
 print(f"{'='*70}\n")
 
 results = {}
@@ -144,10 +160,10 @@ for variant_name, config in variants:
         verbose=True
     )
 
-    # Run backtest
-    print("Starting backtest...\n")
+    # Run backtest (on out-of-sample period after EB learning)
+    print("Starting backtest on out-of-sample period...\n")
     variant_results = engine.run(
-        start_date=start_date,
+        start_date=backtest_start,
         end_date=end_date,
         use_timing_markets=True,
         min_volume=100

@@ -89,18 +89,27 @@ class BayesianGammaFitter:
     def fit_initial(
         self,
         times: np.ndarray,
-        cdf_values: np.ndarray
+        cdf_values: np.ndarray,
+        alpha_prior_mean: float = None,
+        beta_prior_mean: float = None,
+        alpha_prior_std: float = 3.0,
+        beta_prior_std: float = 2.0
     ) -> Optional[BayesianFitResult]:
         """
-        Initial Bayesian fit with weakly informative priors.
+        Initial Bayesian fit with informative or weakly informative priors.
 
-        Uses default priors:
-        - α ~ HalfNormal(5, 3)  # Shape parameter
-        - β ~ HalfNormal(1, 2)  # Rate parameter
+        Uses priors:
+        - α ~ Normal(alpha_prior_mean, alpha_prior_std) if mean provided
+        - β ~ Normal(beta_prior_mean, beta_prior_std) if mean provided
+        - Otherwise: α ~ HalfNormal(5), β ~ HalfNormal(1) (weak priors)
 
         Args:
             times: Time points in years
             cdf_values: CDF values at each time
+            alpha_prior_mean: Mean for alpha prior (from EB if available)
+            beta_prior_mean: Mean for beta prior (from EB if available)
+            alpha_prior_std: Std for alpha prior
+            beta_prior_std: Std for beta prior
 
         Returns:
             BayesianFitResult with posterior samples, or None if fit fails
@@ -122,9 +131,16 @@ class BayesianGammaFitter:
 
         # Build PyMC model
         with pm.Model() as model:
-            # Weakly informative priors
-            alpha = pm.HalfNormal('alpha', sigma=5.0)
-            beta = pm.HalfNormal('beta', sigma=2.0)
+            # Use EB-informed priors if provided, otherwise weak priors
+            if alpha_prior_mean is not None and alpha_prior_mean > 0:
+                alpha = pm.TruncatedNormal('alpha', mu=alpha_prior_mean, sigma=alpha_prior_std, lower=0.01)
+            else:
+                alpha = pm.HalfNormal('alpha', sigma=5.0)
+
+            if beta_prior_mean is not None and beta_prior_mean > 0:
+                beta = pm.TruncatedNormal('beta', mu=beta_prior_mean, sigma=beta_prior_std, lower=0.01)
+            else:
+                beta = pm.HalfNormal('beta', sigma=2.0)
 
             # Likelihood: observed samples from Gamma distribution
             pm.Gamma('obs', alpha=alpha, beta=beta, observed=sample_times)

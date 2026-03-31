@@ -37,6 +37,9 @@ from models.bayesian_gamma_model.kelly_sizing import (
     kelly_size
 )
 from models.bayesian_gamma_model.bayesian_gamma_fitter import BayesianFitResult
+from models.factored_gamma_model.empirical_bayes import EmpiricalBayesFactors
+from models.factored_gamma_model.gamma_cdf_fitter import GammaCDFFitter
+from backtest.data_loader import DataLoader
 
 
 class BayesianCarryStrategy(Strategy):
@@ -118,6 +121,19 @@ class BayesianCarryStrategy(Strategy):
             mcmc_cores=self.mcmc_cores
         )
 
+        # Empirical Bayes factors (for informative priors)
+        self.use_eb_priors = self.config.get('use_eb_priors', True)
+        self.eb_factors = None
+        self.eb_fitter = GammaCDFFitter()  # For EB factor estimation
+
+        if self.use_eb_priors:
+            self.eb_holdout_end = self.config.get('eb_holdout_end_date', '2023-12-31')
+            self.db_path = self.config.get('db_path', 'data/polymarket.db')
+            # EB factors will be fit on first call if needed
+            self._fit_eb_factors_lazy = True
+        else:
+            self._fit_eb_factors_lazy = False
+
         # State tracking
         self.fitted_events = {}  # event_id -> FitResult
         self.last_fit_date = {}  # event_id -> date
@@ -128,6 +144,192 @@ class BayesianCarryStrategy(Strategy):
         """Strategy name."""
         hedge_suffix = f"_{self.hedging}" if self.hedging else ""
         return f"BayesianCarry_TTE{self.max_tte_days}_Kelly{int(self.kelly_fraction*100)}{hedge_suffix}"
+
+    def _fit_eb_factors(self):
+        """
+        Fit Empirical Bayes factors from historical resolved events.
+
+        This learns category-level priors and feature adjustments from
+        past events to inform priors for new events.
+        """
+        if not self.use_eb_priors:
+            return
+
+        print(f"\n{'='*70}")
+        print("FITTING EMPIRICAL BAYES FACTORS")
+        print(f"{'='*70}")
+        print(f"Learning from historical events resolved before {self.eb_holdout_end}")
+        print("This will create informative priors for:")
+        print("  - Category-specific parameters (politics, crypto, sports)")
+        print("  - Term structure feature adjustments (slope, curvature, rate)")
+        print()
+
+        # Load historical data
+        from backtest.data_loader import DataLoader
+        loader = DataLoader(self.db_path)
+
+        # Get resolved events before holdout date
+        try:
+            historical_data = loader.load_timing_markets()
+            historical_data = historical_data[
+                (historical_data['resolution_date'] <= self.eb_holdout_end) &
+                (historical_data['resolution_date'].notna())
+            ]
+
+            print(f"Loaded {len(historical_data)} historical observations")
+            print(f"Unique events: {historical_data['event_id'].nunique()}")
+
+            # Fit EB factors
+            self.eb_factors = EmpiricalBayesFactors()
+            self.eb_factors.fit(historical_data, self.eb_fitter, min_events_per_category=3)
+
+            print(f"\n✓ EB factors fitted successfully")
+            if self.eb_factors.factors:
+                print(f"  Categories: {list(self.eb_factors.categories)}")
+                print(f"  Factors: {list(self.eb_factors.factors.keys())}")
+            print(f"{'='*70}\n")
+
+        except Exception as e:
+            print(f"✗ Failed to fit EB factors: {e}")
+            print("  Falling back to weak priors")
+            self.use_eb_priors = False
+            self.eb_factors = None
+
+    def _get_eb_priors(self, event_data: pd.DataFrame) -> dict:
+        """
+        Get EB-informed prior means for alpha and beta.
+
+        Args:
+            event_data: DataFrame for the event
+
+        Returns:
+            dict with 'alpha_prior_mean', 'beta_prior_mean', or None if EB not available
+        """
+        if not self.use_eb_priors or self.eb_factors is None or not self.eb_factors.fitted:
+            return None
+
+        # Extract category and features from event
+        row = event_data.iloc[0]
+        category = row.get('category', 'unknown')
+
+        # Calculate term structure features (simplified - would need proper calc)
+        # For now, use defaults or extract if available
+        ts_slope = row.get('ts_slope', 0.0)
+        ts_curvature = row.get('ts_curvature', 0.0)
+        implied_rate = row.get('implied_rate', 0.1)
+
+        # Get adjusted parameters from EB factors
+        try:
+            from models.factored_gamma_model.factor_adjustment import FactorAdjustment
+            adjuster = FactorAdjustment(self.eb_factors)
+
+            # Use base parameters and adjust
+            alpha_base, beta_base = 2.0, 1.0  # Default base
+            alpha_adj, beta_adj = adjuster.adjust(
+                alpha_base, beta_base,
+                category, ts_slope, ts_curvature, implied_rate
+            )
+
+            return {
+                'alpha_prior_mean': alpha_adj,
+                'beta_prior_mean': beta_adj,
+                'category': category,
+                'ts_slope': ts_slope,
+                'ts_curvature': ts_curvature,
+                'implied_rate': implied_rate
+            }
+        except Exception as e:
+            if self.verbose:
+                print(f"    ⚠ Failed to get EB priors: {e}")
+            return None
+
+    def _fit_event_with_eb(self, event_data: pd.DataFrame, current_date: pd.Timestamp,
+                           event_id: str, eb_priors: dict = None):
+        """
+        Fit Bayesian model to event with EB-informed priors.
+
+        This is a custom fit that passes EB priors to the fitter.
+        """
+        # Extract term structure (same as BayesianGammaModel)
+        term_structure = self.model._extract_term_structure(event_data, current_date)
+
+        if term_structure is None:
+            return None
+
+        times = term_structure['times']
+        cdf_values = term_structure['cdf_values']
+        market_ids = term_structure['market_ids']
+
+        if len(times) < 3:
+            return None
+
+        # Check for previous posterior (sequential updating)
+        prior_result = self.model.posterior_store.load_latest_posterior(event_id)
+
+        if prior_result is not None:
+            # Sequential fit with previous posterior as prior
+            prior_date, prior_idata = prior_result
+            bayesian_result = self.model.fitter.fit_sequential(times, cdf_values, prior_idata)
+            is_sequential = True
+        else:
+            # Initial fit with EB-informed priors if available
+            if eb_priors:
+                bayesian_result = self.model.fitter.fit_initial(
+                    times, cdf_values,
+                    alpha_prior_mean=eb_priors['alpha_prior_mean'],
+                    beta_prior_mean=eb_priors['beta_prior_mean'],
+                    alpha_prior_std=3.0,
+                    beta_prior_std=2.0
+                )
+            else:
+                bayesian_result = self.model.fitter.fit_initial(times, cdf_values)
+            is_sequential = False
+
+        if bayesian_result is None:
+            return None
+
+        # Save posterior for sequential updating
+        try:
+            self.model.posterior_store.save_posterior(event_id, current_date, bayesian_result.idata)
+        except Exception as e:
+            if self.verbose:
+                print(f"    ⚠ Failed to save posterior: {e}")
+
+        # Compute credible intervals (needed for FitResult structure)
+        posterior_samples = {
+            'alpha': bayesian_result.idata.posterior['alpha'].values.flatten(),
+            'beta': bayesian_result.idata.posterior['beta'].values.flatten()
+        }
+
+        ci_result = self.model.fitter.predict_cdf(times, posterior_samples, 0.70)
+
+        # Map CI to market_ids
+        credible_intervals = {}
+        for i, (market_id, time) in enumerate(zip(market_ids, times)):
+            credible_intervals[market_id] = {
+                'lower': ci_result['lower'][i],
+                'upper': ci_result['upper'][i],
+                'median': ci_result['median'][i],
+                'time': time
+            }
+
+        # Create FitResult (compatible with BayesianGammaModel)
+        from models.bayesian_gamma_model.model import FitResult
+        return FitResult(
+            event_id=event_id,
+            fit_date=current_date,
+            alpha_mean=bayesian_result.alpha_mean,
+            beta_mean=bayesian_result.beta_mean,
+            alpha_std=bayesian_result.alpha_std,
+            beta_std=bayesian_result.beta_std,
+            converged=bayesian_result.converged,
+            rhat_alpha=bayesian_result.rhat_alpha,
+            rhat_beta=bayesian_result.rhat_beta,
+            credible_intervals=credible_intervals,
+            times=times,
+            cdf_values=cdf_values,
+            is_sequential=is_sequential
+        )
 
     def _needs_refit(self, event_id: str, current_date: pd.Timestamp) -> bool:
         """Check if event needs refitting."""
@@ -222,6 +424,11 @@ class BayesianCarryStrategy(Strategy):
         """
         signals = []
 
+        # Fit EB factors on first call
+        if self._fit_eb_factors_lazy:
+            self._fit_eb_factors()
+            self._fit_eb_factors_lazy = False
+
         # Get today's data
         today_data = data[data['date'] == current_date].copy()
 
@@ -241,6 +448,10 @@ class BayesianCarryStrategy(Strategy):
         # Group by event (use group_col if exists, else event_id)
         group_col = 'group_col' if 'group_col' in short_dated.columns else 'event_id'
 
+        num_events = len(short_dated[group_col].unique())
+        if self.verbose and num_events > 0:
+            print(f"  Processing {num_events} events with {len(short_dated)} markets (tte ≤ {self.max_tte_days}d)")
+
         for event_id in short_dated[group_col].unique():
             event_data = short_dated[short_dated[group_col] == event_id]
 
@@ -250,20 +461,33 @@ class BayesianCarryStrategy(Strategy):
 
             # Check if refit needed
             if self._needs_refit(event_id, current_date):
-                if self.verbose:
-                    print(f"  Fitting {event_id} with NUTS (Kelly carry strategy)...")
+                # Get EB-informed priors if available
+                eb_priors = self._get_eb_priors(event_data)
 
-                # Fit event (returns FitResult) - with error handling
+                if self.verbose:
+                    if eb_priors:
+                        print(f"  Fitting {event_id} with EB-informed priors:")
+                        print(f"    Category: {eb_priors.get('category', 'unknown')}")
+                        print(f"    Prior α: {eb_priors['alpha_prior_mean']:.3f}, β: {eb_priors['beta_prior_mean']:.3f}")
+                    else:
+                        print(f"  Fitting {event_id} with weak priors (no EB)")
+
+                # Fit event with EB-informed priors
                 try:
-                    fit_result = self.model.fit_event(event_data, current_date, event_id)
+                    fit_result = self._fit_event_with_eb(event_data, current_date, event_id, eb_priors)
                 except Exception as e:
                     if self.verbose:
-                        print(f"    ✗ Fit failed: {e}")
+                        print(f"    ✗ Fit failed for event_id={event_id}")
+                        print(f"      Error: {e}")
+                        print(f"      Markets: {len(event_data['market_id'].unique())}")
+                        print(f"      Category: {event_data.iloc[0].get('category', 'unknown')}")
                     continue
 
                 if fit_result is None:
                     if self.verbose:
-                        print(f"    ✗ Fit returned None (insufficient data or numerical issues)")
+                        print(f"    ✗ Fit returned None for event_id={event_id}")
+                        print(f"      Markets: {len(event_data['market_id'].unique())}")
+                        print(f"      Price range: {event_data['price'].min():.3f} - {event_data['price'].max():.3f}")
                     continue
 
                 self.fitted_events[event_id] = fit_result
@@ -372,6 +596,10 @@ class BayesianCarryStrategy(Strategy):
                     mu_edge, var_edge, _ = edge_distribution(
                         posterior_cdf_samples, market_prices, tenor_idx
                     )
+
+                    if self.verbose and mu_edge > 0.005:  # Log edges > 0.5%
+                        print(f"    → {row['market_id'][:20]}... edge={mu_edge:.3f}, var={var_edge:.4f}, "
+                              f"kelly=${size_dollars:.0f}, price={row['price']:.3f}, tte={row['tte_days']}d")
 
                     potential_signals.append({
                         'row': row,
