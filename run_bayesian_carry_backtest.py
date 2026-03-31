@@ -42,17 +42,34 @@ DB_PATH = "data/polymarket.db"
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 cursor.execute("SELECT MIN(date), MAX(date) FROM price_history")
-min_date, max_date = cursor.fetchone()
+min_date_str, max_date_str = cursor.fetchone()
 conn.close()
 
-start_date = min_date
-end_date = max_date
+# Convert to pandas timestamps
+min_date = pd.Timestamp(min_date_str)
+max_date = pd.Timestamp(max_date_str)
 
-# EB holdout: use first 1 year of data for learning priors
-# Then backtest on remaining data
-eb_cutoff = pd.Timestamp(min_date) + pd.DateOffset(years=1)
+# Calculate total days in dataset
+total_days = (max_date - min_date).days
+
+# Use first 30% of data for EB learning, remaining 70% for backtest
+eb_learning_days = int(total_days * 0.3)
+eb_cutoff = min_date + pd.DateOffset(days=eb_learning_days)
+
+# Ensure we have at least 30 days for EB learning
+if eb_learning_days < 30:
+    print(f"Warning: Only {total_days} days of data. Using first 30 days for EB.")
+    eb_cutoff = min_date + pd.DateOffset(days=30)
+
+# Set dates
 eb_holdout_end = eb_cutoff.strftime('%Y-%m-%d')
 backtest_start = (eb_cutoff + pd.DateOffset(days=1)).strftime('%Y-%m-%d')
+backtest_end = max_date.strftime('%Y-%m-%d')
+
+# Validate dates
+if pd.Timestamp(backtest_start) >= max_date:
+    raise ValueError(f"Backtest start ({backtest_start}) is after data end ({max_date_str}). "
+                     f"Dataset may be too small. Total days: {total_days}")
 
 # Base configuration (shared across variants)
 base_config = {
@@ -108,9 +125,9 @@ print("Bayesian Carry Strategy with EMPIRICAL BAYES Priors")
 print(f"{'='*70}")
 print(f"Strategy:              Kelly-sized carry on short-dated No contracts")
 print(f"DB:                    {DB_PATH}")
-print(f"Data Range:            {min_date} to {max_date}")
-print(f"EB Learning Period:    {min_date} to {eb_holdout_end} (1 year)")
-print(f"Backtest Period:       {backtest_start} to {end_date}")
+print(f"Data Range:            {min_date_str} to {max_date_str} ({total_days} days)")
+print(f"EB Learning Period:    {min_date_str} to {eb_holdout_end} ({eb_learning_days} days)")
+print(f"Backtest Period:       {backtest_start} to {backtest_end} ({(max_date - pd.Timestamp(backtest_start)).days} days)")
 print(f"Initial Capital:       ${base_config['initial_capital']:,.0f}")
 print(f"Max TTE:               {base_config['max_tte_days']} days")
 print(f"Kelly Fraction:        {base_config['kelly_fraction']*100:.0f}%")
@@ -164,7 +181,7 @@ for variant_name, config in variants:
     print("Starting backtest on out-of-sample period...\n")
     variant_results = engine.run(
         start_date=backtest_start,
-        end_date=end_date,
+        end_date=backtest_end,
         use_timing_markets=True,
         min_volume=100
     )
