@@ -253,17 +253,25 @@ class BayesianCarryStrategy(Strategy):
                 if self.verbose:
                     print(f"  Fitting {event_id} with NUTS (Kelly carry strategy)...")
 
-                # Fit event (returns FitResult)
-                fit_result = self.model.fit_event(event_data, current_date, event_id)
+                # Fit event (returns FitResult) - with error handling
+                try:
+                    fit_result = self.model.fit_event(event_data, current_date, event_id)
+                except Exception as e:
+                    if self.verbose:
+                        print(f"    ✗ Fit failed: {e}")
+                    continue
 
                 if fit_result is None:
+                    if self.verbose:
+                        print(f"    ✗ Fit returned None (insufficient data or numerical issues)")
                     continue
 
                 self.fitted_events[event_id] = fit_result
                 self.last_fit_date[event_id] = current_date
 
                 if self.verbose:
-                    print(f"    ✓ Fit: α={fit_result.alpha_mean:.3f}±{fit_result.alpha_std:.3f}, "
+                    conv_status = "✓" if fit_result.converged else "⚠"
+                    print(f"    {conv_status} Fit: α={fit_result.alpha_mean:.3f}±{fit_result.alpha_std:.3f}, "
                           f"β={fit_result.beta_mean:.3f}±{fit_result.beta_std:.3f}, "
                           f"converged={fit_result.converged}")
 

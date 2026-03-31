@@ -33,16 +33,17 @@ sys.path.insert(0, os.path.dirname(__file__))
 from backtest import BacktestEngine, DataLoader
 from backtest.strategies.bayesian_carry_strategy import BayesianCarryStrategy
 import pandas as pd
+import sqlite3
 
 DB_PATH = "data/polymarket.db"
 
 # Base configuration (shared across variants)
 base_config = {
     # Model parameters
-    'mcmc_draws': 1000,
-    'mcmc_tune': 500,
+    'mcmc_draws': 500,      # Reduced to avoid memory issues
+    'mcmc_tune': 250,       # Reduced tuning steps
     'mcmc_chains': 2,
-    'mcmc_cores': 4,
+    'mcmc_cores': 2,        # Reduced to avoid memory issues
     'refit_days': 7,
 
     # Carry trade parameters
@@ -80,12 +81,22 @@ variants = [
     })
 ]
 
+# Get available date range
+conn = sqlite3.connect(DB_PATH)
+cursor = conn.cursor()
+cursor.execute("SELECT MIN(date), MAX(date) FROM price_history")
+min_date, max_date = cursor.fetchone()
+conn.close()
+
+start_date = min_date
+end_date = max_date
+
 print(f"\n{'='*70}")
 print("Bayesian Carry Strategy Backtest — Three Hedging Variants")
 print(f"{'='*70}")
 print(f"Strategy:              Kelly-sized carry on short-dated No contracts")
 print(f"DB:                    {DB_PATH}")
-print(f"Period:                2025-11-05 to 2026-03-16")
+print(f"Period:                {start_date} to {end_date} (FULL HISTORY)")
 print(f"Initial Capital:       ${base_config['initial_capital']:,.0f}")
 print(f"Max TTE:               {base_config['max_tte_days']} days")
 print(f"Kelly Fraction:        {base_config['kelly_fraction']*100:.0f}%")
@@ -136,8 +147,8 @@ for variant_name, config in variants:
     # Run backtest
     print("Starting backtest...\n")
     variant_results = engine.run(
-        start_date='2025-11-05',
-        end_date='2026-03-16',
+        start_date=start_date,
+        end_date=end_date,
         use_timing_markets=True,
         min_volume=100
     )
