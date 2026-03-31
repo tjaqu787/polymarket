@@ -19,7 +19,7 @@ print("="*80)
 loader = PolymarketDataLoader(DB_PATH)
 
 # Test with a shorter date range
-start_date = "2025-12-01"
+start_date = "2022-12-01"
 end_date = "2026-01-01"
 
 print(f"\nLoading data from {start_date} to {end_date}")

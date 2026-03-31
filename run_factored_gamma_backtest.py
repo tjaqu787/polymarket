@@ -48,7 +48,6 @@ print(f"{'='*70}")
 print(f"Strategy:              {strategy.name}")
 print(f"DB:                    {DB_PATH}")
 print(f"EB Holdout End:        {config['eb_holdout_end_date']}")
-print(f"Backtest Period:       2025-11-05 to 2026-03-16")
 print(f"Initial Capital:       $10,000")
 print(f"Max Event Exposure:    {config['max_event_exposure']*100:.0f}%")
 print(f"CI Level:              {config['ci_level']*100:.0f}%")
@@ -69,7 +68,7 @@ engine = BacktestEngine(
 print("Starting backtest...\n")
 
 results = engine.run(
-    start_date="2025-11-05",
+    start_date="2022-11-05",
     end_date="2026-03-16",
     use_timing_markets=True,
     min_volume=100,

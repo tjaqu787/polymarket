@@ -27,7 +27,6 @@ print(f"Polymarket Backtest — Carry Strategy")
 print(f"{'='*60}")
 print(f"Strategy:       {strategy.name}")
 print(f"DB:             {DB_PATH}")
-print(f"Period:         2025-11-05 to 2026-03-16  (full data range)")
 print(f"Initial Capital: $10,000")
 print(f"{'='*60}\n")
 
@@ -42,7 +41,7 @@ engine = BacktestEngine(
 )
 
 results = engine.run(
-    start_date="2025-11-05",
+    start_date="2022-11-05",
     end_date="2026-03-16",
     use_timing_markets=False,  # Use all markets, not just timing markets
     min_volume=100,
