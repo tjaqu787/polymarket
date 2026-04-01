@@ -386,7 +386,8 @@ class DataLoader:
             query += " AND m.volume_num >= ?"
             params.append(min_volume)
 
-        query += " AND m.active = 1"  # Only active markets
+        # Don't filter by active - markets can become inactive after expiry
+        # but we still need their historical data for backtesting
         query += " ORDER BY ph.date, m.market_id, mt.outcome"
 
         df = pd.read_sql_query(query, conn, params=params)

@@ -94,9 +94,14 @@ class FactoredGammaStrategy(Strategy):
         )
 
         # Track fitted events
-        self.fitted_events = {}  # event_id -> FitResult
+        self.fitted_events = {}  # event_id -> FitResult (or None if fit failed)
         self.last_fit_date = {}  # event_id -> date
         self.factors_fitted = False
+
+        # Track fitting statistics
+        self.fit_attempts = 0
+        self.fit_successes = 0
+        self.fit_failures_by_reason = {}
 
         # Data loader (for loading resolved events for EB fitting)
         db_path = self.config.get('db_path', 'data/polymarket.db')
@@ -420,20 +425,29 @@ class FactoredGammaStrategy(Strategy):
 
             if need_fit:
                 # Fit event using Factored Gamma Model
-                fit_result = self.model.fit_event(event_data, current_date, group_id)
-
-                if fit_result is not None:
-                    self.fitted_events[group_id] = fit_result
+                self.fit_attempts += 1
+                try:
+                    fit_result = self.model.fit_event(event_data, current_date, group_id)
+                    if fit_result is not None:
+                        self.fitted_events[group_id] = fit_result
+                        self.last_fit_date[group_id] = current_date
+                        self.fit_successes += 1
+                    else:
+                        # Fitting failed - store None to indicate we tried
+                        # We'll still trade but without gamma edge sizing
+                        self.fitted_events[group_id] = None
+                        self.last_fit_date[group_id] = current_date
+                        reason = "Unknown"
+                        self.fit_failures_by_reason[reason] = self.fit_failures_by_reason.get(reason, 0) + 1
+                except Exception as e:
+                    # Capture the failure reason
+                    reason = str(e).split(':')[0] if ':' in str(e) else str(e)[:50]
+                    self.fit_failures_by_reason[reason] = self.fit_failures_by_reason.get(reason, 0) + 1
+                    self.fitted_events[group_id] = None
                     self.last_fit_date[group_id] = current_date
-                else:
-                    # Fitting failed, skip this event
-                    continue
 
-            # Get fitted model for this event
-            if group_id not in self.fitted_events:
-                continue
-
-            fit_result = self.fitted_events[group_id]
+            # Get fitted model for this event (may be None if fitting failed)
+            fit_result = self.fitted_events.get(group_id, None)
 
             # PASS 1: Collect all markets that would trigger signals
             potential_signals = []
@@ -470,18 +484,18 @@ class FactoredGammaStrategy(Strategy):
                 if tte_years > 30.0 / 365.25:
                     continue
 
-                # Get prediction from model
-                prediction = self.model.predict(market_id, fit_result, current_date)
+                # Try to get prediction from model (may be None if fit failed)
+                prediction = None
+                model_median = yes_price  # Default: use market price as model
+                gamma_edge = 0.05  # Default edge for equal weighting
 
-                if prediction is None:
-                    continue
-
-                # Model's median prediction (in Yes probability space)
-                model_median = prediction.median
-
-                # Calculate gamma edge (how far actual price is from model)
-                # Model predicts Yes probability, so compare with yes_price
-                gamma_edge = abs(yes_price - model_median)
+                if fit_result is not None:
+                    prediction = self.model.predict(market_id, fit_result, current_date)
+                    if prediction is not None:
+                        # Model's median prediction (in Yes probability space)
+                        model_median = prediction.median
+                        # Calculate gamma edge (how far actual price is from model)
+                        gamma_edge = abs(yes_price - model_median)
 
                 current_position_no = self.get_position(market_id, 'No')
                 current_position_yes = self.get_position(market_id, 'Yes')
@@ -491,6 +505,19 @@ class FactoredGammaStrategy(Strategy):
 
                 # ENTRY LOGIC: Buy Yes when prob > 0.90, No when prob < 0.10
                 if yes_price > 0.90 and current_position_yes == 0:
+                    # Create prediction if model didn't fit
+                    if prediction is None:
+                        from models.factored_gamma_model.model import PredictionResult
+                        prediction = PredictionResult(
+                            market_id=market_id,
+                            lower_bound=yes_price - 0.05,
+                            upper_bound=yes_price + 0.05,
+                            median=yes_price,
+                            interval_width=0.10,
+                            alpha_adjusted=1.0,
+                            beta_adjusted=1.0,
+                            time_to_target=tte_years
+                        )
                     # BUY YES: High probability event, bet with consensus
                     signal_info = {
                         'type': SignalType.BUY,
@@ -502,6 +529,18 @@ class FactoredGammaStrategy(Strategy):
                         'market_tokens': market_tokens.get(market_id, {})
                     }
                 elif yes_price < 0.10 and current_position_no == 0:
+                    if prediction is None:
+                        from models.factored_gamma_model.model import PredictionResult
+                        prediction = PredictionResult(
+                            market_id=market_id,
+                            lower_bound=yes_price - 0.05,
+                            upper_bound=yes_price + 0.05,
+                            median=yes_price,
+                            interval_width=0.10,
+                            alpha_adjusted=1.0,
+                            beta_adjusted=1.0,
+                            time_to_target=tte_years
+                        )
                     # BUY NO: Low probability event, bet against consensus
                     signal_info = {
                         'type': SignalType.BUY,
@@ -516,6 +555,19 @@ class FactoredGammaStrategy(Strategy):
                 elif tte_years <= 7.0 / 365.25:
                     # Exit near expiry
                     if current_position_yes > 0:
+                        # Create a fake prediction for exit signals if model didn't fit
+                        if prediction is None:
+                            from models.factored_gamma_model.model import PredictionResult
+                            prediction = PredictionResult(
+                                market_id=market_id,
+                                lower_bound=yes_price - 0.05,
+                                upper_bound=yes_price + 0.05,
+                                median=yes_price,
+                                interval_width=0.10,
+                                alpha_adjusted=1.0,
+                                beta_adjusted=1.0,
+                                time_to_target=tte_years
+                            )
                         signal_info = {
                             'type': SignalType.SELL,
                             'row': row,
@@ -526,6 +578,18 @@ class FactoredGammaStrategy(Strategy):
                             'direction': 'exit_yes'
                         }
                     elif current_position_no > 0:
+                        if prediction is None:
+                            from models.factored_gamma_model.model import PredictionResult
+                            prediction = PredictionResult(
+                                market_id=market_id,
+                                lower_bound=yes_price - 0.05,
+                                upper_bound=yes_price + 0.05,
+                                median=yes_price,
+                                interval_width=0.10,
+                                alpha_adjusted=1.0,
+                                beta_adjusted=1.0,
+                                time_to_target=tte_years
+                            )
                         signal_info = {
                             'type': SignalType.SELL,
                             'row': row,
@@ -555,3 +619,24 @@ class FactoredGammaStrategy(Strategy):
         self.fitted_events = {}
         self.last_fit_date = {}
         self.factors_fitted = False
+        self.fit_attempts = 0
+        self.fit_successes = 0
+        self.fit_failures_by_reason = {}
+
+    def print_fit_statistics(self):
+        """Print gamma fitting statistics."""
+        print(f"\n{'='*70}")
+        print("GAMMA FITTING STATISTICS")
+        print(f"{'='*70}")
+        print(f"Total fit attempts:    {self.fit_attempts}")
+        print(f"Successful fits:       {self.fit_successes} ({self.fit_successes/max(self.fit_attempts,1)*100:.1f}%)")
+        print(f"Failed fits:           {self.fit_attempts - self.fit_successes}")
+
+        if self.fit_failures_by_reason:
+            print(f"\nFailure reasons:")
+            for reason, count in sorted(self.fit_failures_by_reason.items(), key=lambda x: -x[1]):
+                print(f"  - {reason}: {count}")
+
+        print(f"\nNote: Non-monotonic CDFs may indicate arbitrage opportunities")
+        print(f"      (calendar spreads where near-dated > far-dated contracts)")
+        print(f"{'='*70}\n")

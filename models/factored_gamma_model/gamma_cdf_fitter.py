@@ -115,8 +115,16 @@ class GammaCDFFitter:
             raise ValueError("CDF has insufficient variance (nearly constant)")
 
         # Check for monotonicity (CDF should be non-decreasing)
-        if not np.all(np.diff(cdf_values) >= -1e-6):  # Allow small numerical errors
-            raise ValueError("CDF values are not monotonically increasing")
+        cdf_diffs = np.diff(cdf_values)
+        if not np.all(cdf_diffs >= -1e-6):  # Allow small numerical errors
+            # Find the violations
+            violations = np.where(cdf_diffs < -1e-6)[0]
+            max_violation = np.min(cdf_diffs)
+            raise ValueError(
+                f"CDF not monotonic: {len(violations)} violations, "
+                f"max decrease = {max_violation:.6f} "
+                f"(potential arbitrage opportunity)"
+            )
 
         # Convert CDF to PDF
         time_midpoints, pdf_values = self.cdf_to_pdf(times, cdf_values)

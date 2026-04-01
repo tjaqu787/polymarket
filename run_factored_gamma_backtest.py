@@ -83,6 +83,9 @@ print(f"\n{'='*70}")
 print("BACKTEST RESULTS")
 print(f"{'='*70}\n")
 
+# Print gamma fitting statistics
+strategy.print_fit_statistics()
+
 engine.print_results()
 
 # Save trades
