@@ -357,8 +357,8 @@ class FactoredGammaModel:
         """
         Extract term structure from event data.
 
-        Parses target dates from questions ("by March 2026"), calculates
-        times to target, converts No prices to Yes prices, and sorts.
+        Uses resolution_date (or end_date) from data, calculates
+        times to expiry, converts No prices to Yes prices, and sorts.
 
         Returns:
             Dict with times, cdf_values, market_ids, target_dates
@@ -367,10 +367,16 @@ class FactoredGammaModel:
         term_structure_data = []
 
         for _, row in event_data.iterrows():
-            # Parse target date from question
-            target_date = self._extract_target_date(row['question'])
-            if target_date is None:
-                continue
+            # Use resolution_date or end_date from data
+            if 'resolution_date' in row.index and pd.notna(row['resolution_date']):
+                target_date = pd.to_datetime(row['resolution_date'])
+            elif 'end_date' in row.index and pd.notna(row['end_date']):
+                target_date = pd.to_datetime(row['end_date'])
+            else:
+                # Fallback: try parsing from question
+                target_date = self._extract_target_date(row['question'])
+                if target_date is None:
+                    continue
 
             # Calculate time to target in years
             time_to_target = (target_date - current_date).days / 365.25

@@ -90,6 +90,7 @@ class BacktestEngine:
             self.data = self.data_loader.load_timing_markets(
                 start_date=start_date,
                 end_date=end_date,
+                use_semantic_groups=True
             )
         else:
             self.data = self.data_loader.load_market_data(

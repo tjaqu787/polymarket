@@ -30,6 +30,7 @@ import re
 from backtest.strategy import Strategy, Signal, SignalType
 from backtest.data_loader import DataLoader
 from models.factored_gamma_model.model import FactoredGammaModel
+from utils.kelly_criterion import KellyCriterion
 
 
 class FactoredGammaStrategy(Strategy):
@@ -48,6 +49,9 @@ class FactoredGammaStrategy(Strategy):
         - refit_hours: Hours between refits (default: 6)
         - max_event_exposure: Max portfolio % per event (default: 0.15)
         - eb_holdout_end_date: Factor estimation cutoff (default: "2025-10-05")
+        - use_kelly_sizing: Use Kelly criterion for position sizing (default: True)
+        - kelly_fraction: Fractional Kelly to use (default: 0.25)
+        - min_edge: Minimum edge for Kelly (default: 0.05)
     """
 
     def __init__(self, config: Optional[Dict] = None):
@@ -62,6 +66,22 @@ class FactoredGammaStrategy(Strategy):
         self.refit_hours = self.config.get('refit_hours', 6)  # Changed from refit_days to refit_hours
         self.max_event_exposure = self.config.get('max_event_exposure', 0.15)
         self.eb_holdout_end_date = self.config.get('eb_holdout_end_date', '2025-10-05')
+
+        # Kelly criterion parameters
+        self.use_kelly_sizing = self.config.get('use_kelly_sizing', True)
+        self.kelly_fraction = self.config.get('kelly_fraction', 0.25)
+        self.min_edge = self.config.get('min_edge', 0.05)
+
+        # Initialize Kelly criterion
+        if self.use_kelly_sizing:
+            self.kelly_calculator = KellyCriterion(
+                kelly_fraction=self.kelly_fraction,
+                min_edge=self.min_edge,
+                max_position=self.max_event_exposure,
+                carry_penalty=0.5
+            )
+        else:
+            self.kelly_calculator = None
 
         # Initialize model
         self.model = FactoredGammaModel(
@@ -133,16 +153,15 @@ class FactoredGammaStrategy(Strategy):
         return None
 
     def is_time_distributed_event(self, event_data: pd.DataFrame) -> bool:
-        """Check if an event is time-distributed (has multiple "by X" markets)."""
-        questions_with_by = event_data[
-            event_data['question'].str.contains(' by ', case=False, na=False)
-        ]
-        unique_target_dates = set()
-        for q in questions_with_by['question']:
-            target = self.extract_target_date(q)
-            if target:
-                unique_target_dates.add(target)
-        return len(unique_target_dates) >= self.min_buckets
+        """
+        Check if an event has enough markets for gamma fitting.
+
+        For carry trading, we need markets at different resolutions dates
+        or different thresholds within the same semantic group.
+        """
+        # Count unique markets in this group
+        num_markets = event_data['market_id'].nunique()
+        return num_markets >= self.min_buckets
 
     def fit_empirical_bayes_factors(self, current_date: str) -> bool:
         """
@@ -215,13 +234,13 @@ class FactoredGammaStrategy(Strategy):
         event_id: str
     ) -> List[Signal]:
         """
-        Calculate position sizes based on interval width.
+        Calculate position sizes based on gamma edge magnitude.
 
-        KEY IMPROVEMENT: Position sizing inversely proportional to interval width
-            size ∝ 1 / interval_width
+        KEY IMPROVEMENT: Position sizing proportional to gamma edge
+            size ∝ gamma_edge
 
-        Narrow CI (confident) → larger size
-        Wide CI (uncertain) → smaller size
+        Larger mispricing (vs model) → larger size
+        Smaller mispricing → smaller size
 
         Args:
             potential_signals: List of signal dicts from first pass
@@ -235,102 +254,110 @@ class FactoredGammaStrategy(Strategy):
         # Separate new positions from exits
         new_position_signals = [
             s for s in potential_signals
-            if s['type'] in [SignalType.BUY, SignalType.SHORT]
+            if s['type'] == SignalType.BUY and 'position' not in s
         ]
 
         # Calculate position sizes for new positions
         if len(new_position_signals) > 0:
-            # Calculate total inverse interval width (for normalization)
-            total_inv_width = sum(
-                1.0 / max(s['prediction'].interval_width, 0.01)
-                for s in new_position_signals
-            )
+            # Calculate total gamma edge (for normalization)
+            total_edge = sum(s['gamma_edge'] for s in new_position_signals)
 
-            # Allocate exposure proportional to confidence (inverse width)
-            for signal_info in new_position_signals:
-                row = signal_info['row']
-                prediction = signal_info['prediction']
-                signal_type = signal_info['type']
+            if total_edge > 0:
+                # Allocate exposure proportional to gamma edge
+                for signal_info in new_position_signals:
+                    row = signal_info['row']
+                    prediction = signal_info['prediction']
+                    gamma_edge = signal_info['gamma_edge']
+                    outcome = signal_info['outcome']
+                    direction = signal_info['direction']
 
-                # Weight by inverse interval width
-                inv_width = 1.0 / max(prediction.interval_width, 0.01)
-                weight = inv_width / total_inv_width
+                    # Weight by gamma edge
+                    weight = gamma_edge / total_edge
 
-                # Allocate fraction of max_event_exposure
-                per_market_exposure = self.max_event_exposure * weight
+                    # Allocate fraction of max_event_exposure
+                    per_market_exposure = self.max_event_exposure * weight
 
-                # Calculate size
-                size = self._calculate_position_size(
-                    price=row['price'],
-                    exposure_fraction=per_market_exposure
-                )
+                    # Get the correct price for the outcome we're trading
+                    if outcome == 'Yes':
+                        price = 1.0 - row['price']  # Convert No price to Yes price
+                    else:
+                        price = row['price']  # Use No price directly
 
-                reason_prefix = "Below" if signal_type == SignalType.BUY else "Above"
-                reason = (
-                    f"{reason_prefix} {int(self.ci_level*100)}% CI: "
-                    f"Price={row['price']:.3f}, "
-                    f"Lower={prediction.lower_bound:.3f}, "
-                    f"Upper={prediction.upper_bound:.3f}, "
-                    f"Width={prediction.interval_width:.3f}, "
-                    f"Allocation={per_market_exposure*100:.1f}%"
-                )
+                    # Calculate size
+                    size = self._calculate_position_size(
+                        price=price,
+                        exposure_fraction=per_market_exposure
+                    )
 
-                signals.append(Signal(
-                    market_id=row['market_id'],
-                    token_id=row['token_id'],
-                    outcome='No',
-                    signal_type=signal_type,
-                    size=size,
-                    price=row['price'],
-                    reason=reason,
-                    metadata={
-                        'lower_bound': prediction.lower_bound,
-                        'upper_bound': prediction.upper_bound,
-                        'median': prediction.median,
-                        'interval_width': prediction.interval_width,
-                        'alpha_adjusted': prediction.alpha_adjusted,
-                        'beta_adjusted': prediction.beta_adjusted,
-                        'event_exposure': per_market_exposure,
-                        'event_id': event_id
-                    }
-                ))
+                    # Get token_id for the outcome we're trading
+                    market_tokens = signal_info.get('market_tokens', {})
+                    token_id = market_tokens.get(outcome, row['token_id'])
 
-        # Process exit signals (SELL/COVER)
+                    reason = (
+                        f"Carry trade ({direction}): "
+                        f"YesProb={1.0 - row['price']:.3f}, "
+                        f"Model={prediction.median:.3f}, "
+                        f"Edge={gamma_edge:.3f}, "
+                        f"Allocation={per_market_exposure*100:.1f}%"
+                    )
+
+                    signals.append(Signal(
+                        market_id=row['market_id'],
+                        token_id=token_id,
+                        outcome=outcome,
+                        signal_type=SignalType.BUY,
+                        size=size,
+                        price=price,
+                        reason=reason,
+                        metadata={
+                            'model_median': prediction.median,
+                            'gamma_edge': gamma_edge,
+                            'interval_width': prediction.interval_width,
+                            'alpha_adjusted': prediction.alpha_adjusted,
+                            'beta_adjusted': prediction.beta_adjusted,
+                            'event_exposure': per_market_exposure,
+                            'event_id': event_id,
+                            'direction': direction
+                        }
+                    ))
+
+        # Process exit signals (SELL)
         exit_signals = [
             s for s in potential_signals
-            if s['type'] in [SignalType.SELL, SignalType.COVER]
+            if s['type'] == SignalType.SELL
         ]
 
         for signal_info in exit_signals:
             row = signal_info['row']
             prediction = signal_info['prediction']
-            signal_type = signal_info['type']
+            outcome = signal_info['outcome']
             position_size = signal_info['position']
+            direction = signal_info['direction']
 
-            reason_prefix = "Exit long" if signal_type == SignalType.SELL else "Exit short"
-            bound_type = "upper" if signal_type == SignalType.SELL else "lower"
-            bound_value = prediction.upper_bound if signal_type == SignalType.SELL else prediction.lower_bound
+            # Get the correct price for the outcome
+            if outcome == 'Yes':
+                price = 1.0 - row['price']
+            else:
+                price = row['price']
 
             reason = (
-                f"{reason_prefix} at {bound_type} bound: "
-                f"Price={row['price']:.3f}, "
-                f"{bound_type.capitalize()}={bound_value:.3f}"
+                f"Exit carry trade ({direction}): "
+                f"YesProb={1.0 - row['price']:.3f}, "
+                f"Model={prediction.median:.3f}"
             )
 
             signals.append(Signal(
                 market_id=row['market_id'],
                 token_id=row['token_id'],
-                outcome='No',
-                signal_type=signal_type,
+                outcome=outcome,
+                signal_type=SignalType.SELL,
                 size=position_size,
-                price=row['price'],
+                price=price,
                 reason=reason,
                 metadata={
-                    'lower_bound': prediction.lower_bound,
-                    'upper_bound': prediction.upper_bound,
-                    'median': prediction.median,
-                    'interval_width': prediction.interval_width,
-                    'event_id': event_id
+                    'model_median': prediction.median,
+                    'event_id': event_id,
+                    'direction': direction
                 }
             ))
 
@@ -409,9 +436,37 @@ class FactoredGammaStrategy(Strategy):
             # PASS 1: Collect all markets that would trigger signals
             potential_signals = []
 
+            # Group by market_id to get both Yes and No tokens
+            market_tokens = {}
+            for _, row in event_data.iterrows():
+                market_id = row['market_id']
+                outcome = row['outcome']
+                if market_id not in market_tokens:
+                    market_tokens[market_id] = {}
+                market_tokens[market_id][outcome] = row['token_id']
+
+            # Iterate over No outcome rows (we'll use them as reference)
             for _, row in event_data[event_data['outcome'] == 'No'].iterrows():
                 market_id = row['market_id']
-                market_price = row['price']
+                no_price = row['price']
+                yes_price = 1.0 - no_price
+
+                # Check if we have time_to_expiration column
+                if 'time_to_expiration' not in row.index:
+                    # Calculate TTE if not present
+                    if 'resolution_date' in row.index:
+                        tte_days = (pd.to_datetime(row['resolution_date']) - current_date).days
+                        tte_years = tte_days / 365.25
+                    else:
+                        continue
+                else:
+                    tte_years = row['time_to_expiration']
+
+                # CARRY TRADE ENTRY CRITERIA:
+                # 1. TTE <= 30 days (0.082 years)
+                # 2. Extreme probability (Yes < 0.10 or Yes > 0.90)
+                if tte_years > 30.0 / 365.25:
+                    continue
 
                 # Get prediction from model
                 prediction = self.model.predict(market_id, fit_result, current_date)
@@ -419,43 +474,65 @@ class FactoredGammaStrategy(Strategy):
                 if prediction is None:
                     continue
 
-                lower_bound = prediction.lower_bound
-                upper_bound = prediction.upper_bound
-                current_position = self.get_position(market_id, 'No')
+                # Model's median prediction (in Yes probability space)
+                model_median = prediction.median
+
+                # Calculate gamma edge (how far actual price is from model)
+                # Model predicts Yes probability, so compare with yes_price
+                gamma_edge = abs(yes_price - model_median)
+
+                current_position_no = self.get_position(market_id, 'No')
+                current_position_yes = self.get_position(market_id, 'Yes')
 
                 # Check which signal type this would trigger
                 signal_info = None
 
-                if market_price < lower_bound and current_position == 0:
-                    # BUY signal: price below lower bound (underpriced)
+                # ENTRY LOGIC: Buy Yes when prob > 0.90, No when prob < 0.10
+                if yes_price > 0.90 and current_position_yes == 0:
+                    # BUY YES: High probability event, bet with consensus
                     signal_info = {
                         'type': SignalType.BUY,
                         'row': row,
-                        'prediction': prediction
+                        'prediction': prediction,
+                        'outcome': 'Yes',
+                        'gamma_edge': gamma_edge,
+                        'direction': 'long_yes',
+                        'market_tokens': market_tokens.get(market_id, {})
                     }
-                elif market_price > upper_bound and current_position == 0:
-                    # SHORT signal: price above upper bound (overpriced)
+                elif yes_price < 0.10 and current_position_no == 0:
+                    # BUY NO: Low probability event, bet against consensus
                     signal_info = {
-                        'type': SignalType.SHORT,
-                        'row': row,
-                        'prediction': prediction
-                    }
-                elif market_price >= upper_bound and current_position > 0:
-                    # SELL signal: exit long position at upper bound
-                    signal_info = {
-                        'type': SignalType.SELL,
+                        'type': SignalType.BUY,
                         'row': row,
                         'prediction': prediction,
-                        'position': current_position
+                        'outcome': 'No',
+                        'gamma_edge': gamma_edge,
+                        'direction': 'long_no',
+                        'market_tokens': market_tokens.get(market_id, {})
                     }
-                elif market_price <= lower_bound and current_position < 0:
-                    # COVER signal: exit short position at lower bound
-                    signal_info = {
-                        'type': SignalType.COVER,
-                        'row': row,
-                        'prediction': prediction,
-                        'position': abs(current_position)
-                    }
+                # EXIT LOGIC: Exit at TTE = 7 days or if probability normalizes
+                elif tte_years <= 7.0 / 365.25:
+                    # Exit near expiry
+                    if current_position_yes > 0:
+                        signal_info = {
+                            'type': SignalType.SELL,
+                            'row': row,
+                            'prediction': prediction,
+                            'outcome': 'Yes',
+                            'position': current_position_yes,
+                            'gamma_edge': gamma_edge,
+                            'direction': 'exit_yes'
+                        }
+                    elif current_position_no > 0:
+                        signal_info = {
+                            'type': SignalType.SELL,
+                            'row': row,
+                            'prediction': prediction,
+                            'outcome': 'No',
+                            'position': current_position_no,
+                            'gamma_edge': gamma_edge,
+                            'direction': 'exit_no'
+                        }
 
                 if signal_info is not None:
                     potential_signals.append(signal_info)

@@ -13,3 +13,4 @@ models/time_discounting_model/__pycache__/model.cpython-312.pyc
 model_output/*
 models/poisson_timing_model/__pycache__/*
 models/factored_gamma_model/__pycache__/*
+models/bayesian_gamma_model/__pycache__/*
