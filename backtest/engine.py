@@ -65,6 +65,7 @@ class BacktestEngine:
         market_ids: Optional[List[str]] = None,
         event_ids: Optional[List[str]] = None,
         use_timing_markets: bool = True,
+        use_carry_markets: bool = False,
         min_volume: float = 0
     ) -> Dict:
         """
@@ -75,7 +76,8 @@ class BacktestEngine:
             end_date: End date (YYYY-MM-DD)
             market_ids: Specific market IDs to test
             event_ids: Specific event IDs to test
-            use_timing_markets: Use timing markets view
+            use_timing_markets: Use timing markets view (filtered to timing questions)
+            use_carry_markets: Use all markets with semantic grouping (for carry trading)
             min_volume: Minimum market volume
 
         Returns:
@@ -86,7 +88,13 @@ class BacktestEngine:
         logger.info(f"Initial capital: ${self.initial_capital:,.2f}")
 
         # Load data
-        if use_timing_markets:
+        if use_carry_markets:
+            self.data = self.data_loader.load_carry_markets(
+                start_date=start_date,
+                end_date=end_date,
+                min_volume=min_volume
+            )
+        elif use_timing_markets:
             self.data = self.data_loader.load_timing_markets(
                 start_date=start_date,
                 end_date=end_date,

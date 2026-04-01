@@ -96,10 +96,27 @@ class GammaCDFFitter:
         # Validate inputs
         if len(times) < 2:
             raise ValueError("Need at least 2 time points to fit")
-        if not np.all(np.diff(times) > 0):
-            raise ValueError("Times must be strictly increasing")
+
+        # Check for strictly increasing times
+        time_diffs = np.diff(times)
+        if not np.all(time_diffs > 0):
+            min_dt = np.min(time_diffs)
+            raise ValueError(f"Times not strictly increasing: min dt = {min_dt}")
+
         if not np.all((cdf_values >= 0) & (cdf_values <= 1)):
             raise ValueError("CDF values must be in [0, 1]")
+
+        # Check for extreme values that cause numerical issues
+        # Clip CDF values away from exact 0 or 1
+        cdf_values = np.clip(cdf_values, 1e-6, 1 - 1e-6)
+
+        # Check for sufficient variance in CDF
+        if np.std(cdf_values) < 1e-6:
+            raise ValueError("CDF has insufficient variance (nearly constant)")
+
+        # Check for monotonicity (CDF should be non-decreasing)
+        if not np.all(np.diff(cdf_values) >= -1e-6):  # Allow small numerical errors
+            raise ValueError("CDF values are not monotonically increasing")
 
         # Convert CDF to PDF
         time_midpoints, pdf_values = self.cdf_to_pdf(times, cdf_values)
@@ -122,6 +139,18 @@ class GammaCDFFitter:
         # We force loc=0 (no shift), so Gamma(shape, scale)
         try:
             shape, loc, scale = gamma.fit(sample_times, floc=0)
+
+            # Validate fitted parameters
+            if not np.isfinite(shape) or not np.isfinite(scale):
+                raise ValueError("Fitted parameters are not finite")
+            if shape <= 0 or scale <= 0:
+                raise ValueError(f"Invalid parameters: shape={shape}, scale={scale}")
+            # Check for extreme values that might cause overflow
+            if shape > 1000 or scale > 1000:
+                raise ValueError(f"Fitted parameters too large: shape={shape}, scale={scale}")
+            if shape < 0.001 or scale < 0.001:
+                raise ValueError(f"Fitted parameters too small: shape={shape}, scale={scale}")
+
         except Exception as e:
             raise ValueError(f"Gamma fit failed: {e}")
 

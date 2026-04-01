@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-Run backtest using the FactoredGammaStrategy.
+Run backtest using the FactoredGammaCarryStrategy.
 
-This strategy unifies:
-- Gamma CDF fitting from PoissonTimingStrategy
-- Empirical Bayes factor adjustments inspired by TimeDiscountingStrategy
+This strategy implements carry trading on prediction markets:
+- Trades extreme probability markets (< 0.10 or > 0.90) near expiry (TTE ≤ 30 days)
+- Uses Gamma CDF fitting across semantic groups to identify mispriced markets
+- Scales positions by gamma edge (distance from model prediction)
 
-Key improvements:
-- Category-level priors (politics vs crypto vs sports)
-- Term structure feature adjustments (slope, curvature, implied rate)
-- Dynamic position sizing based on prediction confidence (interval width)
+Key features:
+- Entry: TTE ≤ 30 days + extreme probabilities
+- Exit: TTE ≤ 7 days (near expiry)
+- Position sizing: Proportional to gamma edge magnitude
+- Risk management: 15% max exposure per semantic group
 
 Configuration:
 - Empirical Bayes holdout end: 2025-10-05 (1 month before backtest)
-- Backtest period: 2025-11-05 to 2026-03-16
+- Backtest period: 2022-11-05 to 2026-03-16
 - Max event exposure: 15% of portfolio
-- Credible interval: 70%
 """
 
 import sys
@@ -43,7 +44,7 @@ strategy = FactoredGammaStrategy(config=config)
 data_loader = DataLoader(DB_PATH)
 
 print(f"\n{'='*70}")
-print(f"Polymarket Backtest — Factored Gamma Timing Strategy")
+print(f"Polymarket Backtest — Factored Gamma Carry Strategy")
 print(f"{'='*70}")
 print(f"Strategy:              {strategy.name}")
 print(f"DB:                    {DB_PATH}")
@@ -70,7 +71,7 @@ print("Starting backtest...\n")
 results = engine.run(
     start_date="2022-11-05",
     end_date="2026-03-16",
-    use_timing_markets=True,
+    use_carry_markets=True,  # Use all markets for carry trading
     min_volume=100,
 )
 

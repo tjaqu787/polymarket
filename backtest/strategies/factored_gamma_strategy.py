@@ -1,20 +1,22 @@
 """
-Factored Gamma Timing Strategy
+Factored Gamma Carry Strategy
 
-Trading strategy using the Factored Gamma Model for prediction market timing.
-Unifies PoissonTimingStrategy with Empirical Bayes factor adjustments.
+Carry trading strategy using the Factored Gamma Model for prediction markets.
+Trades extreme probability markets near expiry, scaling positions by gamma edge.
 
 Trading Logic:
-- BUY when market_price < CI_lower (underpriced relative to timing model)
-- SHORT when market_price > CI_upper (overpriced)
-- SELL when long position price reaches CI_upper
-- COVER when short position price reaches CI_lower
+- BUY YES when Yes_prob > 0.90 AND TTE ≤ 30 days (high confidence events)
+- BUY NO when Yes_prob < 0.10 AND TTE ≤ 30 days (low confidence events)
+- EXIT when TTE ≤ 7 days (near expiry)
 
 Position Sizing:
-    size = max_event_exposure / (num_signals * interval_width)
+    size ∝ gamma_edge * max_event_exposure
 
-Narrow CI (confident timing) → larger size
-Wide CI (uncertain timing) → smaller size
+Larger gamma edge (|market - model|) → larger position
+Smaller gamma edge → smaller position
+
+The gamma model fits a term structure across semantic groups to identify
+markets that are mispriced relative to the implied volatility surface.
 """
 
 import sys
@@ -35,14 +37,14 @@ from utils.kelly_criterion import KellyCriterion
 
 class FactoredGammaStrategy(Strategy):
     """
-    Factored Gamma timing strategy with dynamic position sizing.
+    Factored Gamma carry trading strategy with gamma edge-based position sizing.
 
-    Replaces both TimeDiscountingStrategy and PoissonTimingStrategy
-    by combining Gamma CDF fitting with Empirical Bayes factor adjustments.
+    Trades extreme probability markets (< 0.10 or > 0.90) near expiry (TTE ≤ 30 days),
+    using a Gamma model fitted across semantic groups to identify mispriced markets.
 
     Configuration Parameters:
         - db_path: Path to polymarket.db (default: 'data/polymarket.db')
-        - min_buckets: Min term structure points (default: 3)
+        - min_buckets: Min markets in semantic group (default: 3)
         - max_rmse: Max fit error threshold (default: 0.3)
         - ci_level: Credible interval level (default: 0.70)
         - n_bootstrap: Bootstrap samples (default: 500)
@@ -103,7 +105,7 @@ class FactoredGammaStrategy(Strategy):
     @property
     def name(self) -> str:
         """Return strategy name for logging."""
-        return f"FactoredGamma_CI{int(self.ci_level*100)}"
+        return f"FactoredGammaCarry_TTE30"
 
     def convert_no_price_to_yes(self, no_price: float) -> float:
         """
