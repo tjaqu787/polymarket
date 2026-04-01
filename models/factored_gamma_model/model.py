@@ -69,6 +69,22 @@ class PredictionResult:
     rate_edge: float  # |market_rate - model_rate| = our edge
 
 
+@dataclass
+class CalendarSpreadOpportunity:
+    """
+    Container for calendar spread arbitrage opportunities.
+
+    Occurs when P(by earlier date) > P(by later date), violating monotonicity.
+    Arbitrage: BUY later date, SELL earlier date.
+    """
+    event_id: str
+    fit_date: pd.Timestamp
+    spread_pairs: List[Dict]  # [{near_market_id, far_market_id, near_time, far_time, near_cdf, far_cdf, spread_edge}]
+    times: np.ndarray
+    cdf_values: np.ndarray
+    market_ids: List[str]
+
+
 class FactoredGammaModel:
     """
     Main Factored Gamma Timing Model.
@@ -158,6 +174,55 @@ class FactoredGammaModel:
 
         print("✓ Empirical Bayes factors fitted successfully")
 
+    def detect_calendar_spread_opportunities(
+        self,
+        times: np.ndarray,
+        cdf_values: np.ndarray,
+        market_ids: List[str],
+        event_id: str,
+        current_date: pd.Timestamp
+    ) -> Optional[CalendarSpreadOpportunity]:
+        """
+        Detect calendar spread arbitrage from non-monotonic CDF.
+
+        When CDF(t1) > CDF(t2) for t1 < t2, this is impossible and represents
+        a mispricing between the two markets.
+
+        Arbitrage: BUY the later-dated market, SELL the earlier-dated market.
+        """
+        cdf_diffs = np.diff(cdf_values)
+        violation_indices = np.where(cdf_diffs < -1e-6)[0]
+
+        if len(violation_indices) == 0:
+            return None
+
+        spread_pairs = []
+        for idx in violation_indices:
+            near_idx = idx
+            far_idx = idx + 1
+
+            # Calculate spread edge (how much the CDF decreases)
+            spread_edge = abs(cdf_diffs[idx])
+
+            spread_pairs.append({
+                'near_market_id': market_ids[near_idx],
+                'far_market_id': market_ids[far_idx],
+                'near_time': times[near_idx],
+                'far_time': times[far_idx],
+                'near_cdf': cdf_values[near_idx],
+                'far_cdf': cdf_values[far_idx],
+                'spread_edge': spread_edge
+            })
+
+        return CalendarSpreadOpportunity(
+            event_id=event_id,
+            fit_date=current_date,
+            spread_pairs=spread_pairs,
+            times=times,
+            cdf_values=cdf_values,
+            market_ids=market_ids
+        )
+
     def fit_event(
         self,
         event_data: pd.DataFrame,
@@ -225,7 +290,18 @@ class FactoredGammaModel:
         try:
             fit_result = self.fitter.fit(times, cdf_values)
         except Exception as e:
+            error_msg = str(e)
             print(f"Gamma fit failed for {event_id}: {e}")
+
+            # Check if this is a non-monotonic CDF (calendar spread opportunity)
+            if "not monotonic" in error_msg.lower():
+                calendar_spread = self.detect_calendar_spread_opportunities(
+                    times, cdf_values, market_ids, event_id, current_date
+                )
+                if calendar_spread is not None:
+                    # Return calendar spread opportunity instead of None
+                    return calendar_spread
+
             return None
 
         # Check fit quality

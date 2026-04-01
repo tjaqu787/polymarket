@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
 """
-Run backtest using the FactoredGammaTimingArbStrategy.
+Run backtest using the Hybrid Factored Gamma Strategy.
 
-This strategy implements timing distribution arbitrage on prediction markets:
+Combines two arbitrage strategies:
+
+STRATEGY 1: Timing Distribution Arbitrage
 - Builds term structure from semantic groups ("by April", "by May", etc.)
 - Extracts implied risk rates: λ = -ln(yes_price) / time_to_expiry
 - Fits Gamma distribution to the implied timing CDF
 - Trades markets where implied rate deviates from model rate
-- Scales positions by rate edge magnitude
-
-Key features:
 - Entry: rate_edge > 0.1 (significant rate mispricing)
 - Exit: Price reverts to model fair value
-- Position sizing: Proportional to |market_rate - model_rate|
+
+STRATEGY 2: Calendar Spread Arbitrage
+- Detects non-monotonic CDFs: P(by earlier) > P(by later)
+- Trades the calendar spread: LONG far-dated, SHORT near-dated
+- Entry: CDF violation detected
+- Exit: Spread converges or markets resolve
+- Captures well-known betting market bias
+
+Key features:
+- Automatic strategy selection based on CDF properties
+- Position sizing: Proportional to edge magnitude
 - Risk management: 15% max exposure per semantic group
 
 Configuration:
@@ -46,7 +55,8 @@ strategy = FactoredGammaStrategy(config=config)
 data_loader = DataLoader(DB_PATH)
 
 print(f"\n{'='*70}")
-print(f"Polymarket Backtest — Factored Gamma Timing Arbitrage")
+print(f"Polymarket Backtest — Hybrid Strategy")
+print(f"Timing Arbitrage + Calendar Spreads")
 print(f"{'='*70}")
 print(f"Strategy:              {strategy.name}")
 print(f"DB:                    {DB_PATH}")

@@ -118,12 +118,22 @@ class GammaCDFFitter:
 
         # Check for monotonicity (CDF should be non-decreasing)
         cdf_diffs = np.diff(cdf_values)
+        monotonic_violations = None
         if not np.all(cdf_diffs >= -1e-6):  # Allow small numerical errors
-            # Find the violations
-            violations = np.where(cdf_diffs < -1e-6)[0]
+            # Find the violations - store them instead of failing immediately
+            violation_indices = np.where(cdf_diffs < -1e-6)[0]
             max_violation = np.min(cdf_diffs)
+
+            # Package violation info for calendar spread arbitrage
+            monotonic_violations = {
+                'violation_indices': violation_indices,
+                'max_violation': max_violation,
+                'num_violations': len(violation_indices)
+            }
+
+            # For now, still raise the error (we'll handle this in the model)
             raise ValueError(
-                f"CDF not monotonic: {len(violations)} violations, "
+                f"CDF not monotonic: {len(violation_indices)} violations, "
                 f"max decrease = {max_violation:.6f} "
                 f"(potential arbitrage opportunity)"
             )
