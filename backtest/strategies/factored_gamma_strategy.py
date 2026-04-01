@@ -443,9 +443,12 @@ class FactoredGammaStrategy(Strategy):
 
             if need_fit:
                 # Fit event using Factored Gamma Model
+                # IMPORTANT: Only pass No outcomes to avoid duplicate term structure points
+                event_data_no = event_data[event_data['outcome'] == 'No'].copy()
+
                 self.fit_attempts += 1
                 try:
-                    fit_result = self.model.fit_event(event_data, current_date, group_id)
+                    fit_result = self.model.fit_event(event_data_no, current_date, group_id)
                     if fit_result is not None:
                         self.fitted_events[group_id] = fit_result
                         self.last_fit_date[group_id] = current_date
