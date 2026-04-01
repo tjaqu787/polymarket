@@ -412,6 +412,11 @@ class FactoredGammaStrategy(Strategy):
         for group_id in today_data[group_col].unique():
             event_data = today_data[today_data[group_col] == group_id]
 
+            # For each market, keep only the latest price snapshot of the day
+            # This avoids having 24 hourly snapshots creating duplicate term structure points
+            if 'ts' in event_data.columns:
+                event_data = event_data.sort_values('ts').groupby(['market_id', 'outcome'], as_index=False).last()
+
             # Check if this is a time-distributed event
             if not self.is_time_distributed_event(event_data):
                 continue

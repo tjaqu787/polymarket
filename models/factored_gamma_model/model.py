@@ -367,16 +367,17 @@ class FactoredGammaModel:
         term_structure_data = []
 
         for _, row in event_data.iterrows():
-            # Use resolution_date or end_date from data
-            if 'resolution_date' in row.index and pd.notna(row['resolution_date']):
-                target_date = pd.to_datetime(row['resolution_date'])
-            elif 'end_date' in row.index and pd.notna(row['end_date']):
-                target_date = pd.to_datetime(row['end_date'])
-            else:
-                # Fallback: try parsing from question
-                target_date = self._extract_target_date(row['question'])
-                if target_date is None:
-                    continue
+            # Try to parse target date from question text first (more accurate)
+            target_date = self._extract_target_date(row['question'])
+
+            # Fallback to resolution_date or end_date if parsing fails
+            if target_date is None:
+                if 'resolution_date' in row.index and pd.notna(row['resolution_date']):
+                    target_date = pd.to_datetime(row['resolution_date'])
+                elif 'end_date' in row.index and pd.notna(row['end_date']):
+                    target_date = pd.to_datetime(row['end_date'])
+                else:
+                    continue  # Skip if we can't determine target date
 
             # Calculate time to target in years
             time_to_target = (target_date - current_date).days / 365.25
@@ -407,18 +408,33 @@ class FactoredGammaModel:
         market_ids = [x['market_id'] for x in term_structure_data]
         target_dates = [x['target_date'] for x in term_structure_data]
 
-        # Remove duplicates (keep first occurrence)
+        # Remove near-duplicates (times within 1 day tolerance)
+        # Average CDF values for markets with similar target dates
         unique_times = []
         unique_cdf_values = []
         unique_market_ids = []
         unique_target_dates = []
 
-        for i, t in enumerate(times):
-            if i == 0 or t != times[i-1]:
-                unique_times.append(t)
-                unique_cdf_values.append(cdf_values[i])
-                unique_market_ids.append(market_ids[i])
-                unique_target_dates.append(target_dates[i])
+        time_tolerance = 1.0 / 365.25  # 1 day in years
+
+        i = 0
+        while i < len(times):
+            current_time = times[i]
+
+            # Find all times within tolerance
+            j = i
+            while j < len(times) and abs(times[j] - current_time) < time_tolerance:
+                j += 1
+
+            # Average the CDF values for this time bucket
+            avg_cdf = np.mean(cdf_values[i:j])
+
+            unique_times.append(current_time)
+            unique_cdf_values.append(avg_cdf)
+            unique_market_ids.append(market_ids[i])  # Keep first market_id
+            unique_target_dates.append(target_dates[i])
+
+            i = j  # Move to next bucket
 
         return {
             'times': np.array(unique_times),
