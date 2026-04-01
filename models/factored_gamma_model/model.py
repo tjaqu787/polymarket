@@ -38,13 +38,15 @@ class FitResult:
     beta_adjusted: float
     rmse: float
     aic: float
-    credible_intervals: Dict[str, Dict[str, np.ndarray]]  # market_id -> {lower, upper, median, time}
+    credible_intervals: Dict[str, Dict[str, np.ndarray]]  # market_id -> {lower, upper, median, time, market_rate, model_rate}
     times: np.ndarray
     cdf_values: np.ndarray
+    market_implied_rates: np.ndarray  # Market-implied hazard rates at each tenor
+    model_implied_rates: np.ndarray   # Model-implied hazard rates from fitted Gamma
     category: str
     ts_slope: float
     ts_curvature: float
-    implied_rate: float
+    implied_rate: float  # Average implied rate across term structure
 
 
 @dataclass
@@ -52,7 +54,7 @@ class PredictionResult:
     """
     Container for market-specific prediction.
 
-    Provides CI bounds and interval width for position sizing.
+    Provides CI bounds, interval width, and rate edge for position sizing.
     """
     market_id: str
     lower_bound: float
@@ -62,6 +64,9 @@ class PredictionResult:
     alpha_adjusted: float
     beta_adjusted: float
     time_to_target: float  # Years to target date
+    market_implied_rate: float  # Rate implied by market price
+    model_implied_rate: float   # Rate implied by Gamma model
+    rate_edge: float  # |market_rate - model_rate| = our edge
 
 
 class FactoredGammaModel:
@@ -208,6 +213,7 @@ class FactoredGammaModel:
 
         times = term_structure['times']
         cdf_values = term_structure['cdf_values']
+        implied_rates = term_structure['implied_rates']
         market_ids = term_structure['market_ids']
         target_dates = term_structure['target_dates']
 
@@ -273,7 +279,13 @@ class FactoredGammaModel:
                 implied_rate=implied_rate
             )
 
-            # Map CI bounds to market_ids
+            # Calculate model-implied rates from fitted Gamma CDF
+            # Rate = -ln(1 - CDF) / time
+            model_cdf = ci_result['median']
+            model_cdf_clipped = np.clip(model_cdf, 1e-6, 1 - 1e-6)
+            model_rates = -np.log(1 - model_cdf_clipped) / times
+
+            # Map CI bounds and rates to market_ids
             credible_intervals = {}
             for i, (market_id, time, target_date) in enumerate(zip(market_ids, times, target_dates)):
                 credible_intervals[market_id] = {
@@ -281,7 +293,9 @@ class FactoredGammaModel:
                     'upper': ci_result['upper'][i],
                     'median': ci_result['median'][i],
                     'time': time,
-                    'target_date': target_date
+                    'target_date': target_date,
+                    'market_rate': implied_rates[i],
+                    'model_rate': model_rates[i]
                 }
 
         except Exception as e:
@@ -301,10 +315,12 @@ class FactoredGammaModel:
             credible_intervals=credible_intervals,
             times=times,
             cdf_values=cdf_values,
+            market_implied_rates=implied_rates,
+            model_implied_rates=model_rates,
             category=category,
             ts_slope=ts_slope,
             ts_curvature=ts_curvature,
-            implied_rate=implied_rate
+            implied_rate=np.mean(implied_rates)  # Average rate across term structure
         )
 
     def predict(
@@ -338,6 +354,11 @@ class FactoredGammaModel:
         interval_width = upper_bound - lower_bound
         time_to_target = ci['time']
 
+        # Get rate information
+        market_rate = ci.get('market_rate', 0.0)
+        model_rate = ci.get('model_rate', 0.0)
+        rate_edge = abs(market_rate - model_rate)
+
         return PredictionResult(
             market_id=market_id,
             lower_bound=lower_bound,
@@ -346,7 +367,10 @@ class FactoredGammaModel:
             interval_width=interval_width,
             alpha_adjusted=fit_result.alpha_adjusted,
             beta_adjusted=fit_result.beta_adjusted,
-            time_to_target=time_to_target
+            time_to_target=time_to_target,
+            market_implied_rate=market_rate,
+            model_implied_rate=model_rate,
+            rate_edge=rate_edge
         )
 
     def _extract_term_structure(
@@ -389,10 +413,19 @@ class FactoredGammaModel:
             no_price = row['price']
             yes_price = 1.0 - no_price
 
+            # Get implied rate if available, otherwise calculate it
+            if 'implied_rate' in row.index and pd.notna(row['implied_rate']):
+                implied_rate = row['implied_rate']
+            else:
+                # Calculate: λ = -ln(yes_price) / t
+                yes_price_clipped = np.clip(yes_price, 1e-6, 1 - 1e-6)
+                implied_rate = -np.log(yes_price_clipped) / time_to_target
+
             term_structure_data.append({
                 'market_id': row['market_id'],
                 'time': time_to_target,
                 'cdf_value': yes_price,
+                'implied_rate': implied_rate,
                 'target_date': target_date
             })
 
@@ -405,13 +438,15 @@ class FactoredGammaModel:
         # Extract arrays
         times = np.array([x['time'] for x in term_structure_data])
         cdf_values = np.array([x['cdf_value'] for x in term_structure_data])
+        implied_rates = np.array([x['implied_rate'] for x in term_structure_data])
         market_ids = [x['market_id'] for x in term_structure_data]
         target_dates = [x['target_date'] for x in term_structure_data]
 
         # Remove near-duplicates (times within 1 day tolerance)
-        # Average CDF values for markets with similar target dates
+        # Average CDF values and implied rates for markets with similar target dates
         unique_times = []
         unique_cdf_values = []
+        unique_implied_rates = []
         unique_market_ids = []
         unique_target_dates = []
 
@@ -426,11 +461,13 @@ class FactoredGammaModel:
             while j < len(times) and abs(times[j] - current_time) < time_tolerance:
                 j += 1
 
-            # Average the CDF values for this time bucket
+            # Average the CDF values and implied rates for this time bucket
             avg_cdf = np.mean(cdf_values[i:j])
+            avg_rate = np.mean(implied_rates[i:j])
 
             unique_times.append(current_time)
             unique_cdf_values.append(avg_cdf)
+            unique_implied_rates.append(avg_rate)
             unique_market_ids.append(market_ids[i])  # Keep first market_id
             unique_target_dates.append(target_dates[i])
 
@@ -439,6 +476,7 @@ class FactoredGammaModel:
         return {
             'times': np.array(unique_times),
             'cdf_values': np.array(unique_cdf_values),
+            'implied_rates': np.array(unique_implied_rates),
             'market_ids': unique_market_ids,
             'target_dates': unique_target_dates
         }

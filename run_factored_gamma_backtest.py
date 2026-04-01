@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-Run backtest using the FactoredGammaCarryStrategy.
+Run backtest using the FactoredGammaTimingArbStrategy.
 
-This strategy implements carry trading on prediction markets:
-- Trades extreme probability markets (< 0.10 or > 0.90) near expiry (TTE ≤ 30 days)
-- Uses Gamma CDF fitting across semantic groups to identify mispriced markets
-- Scales positions by gamma edge (distance from model prediction)
+This strategy implements timing distribution arbitrage on prediction markets:
+- Builds term structure from semantic groups ("by April", "by May", etc.)
+- Extracts implied risk rates: λ = -ln(yes_price) / time_to_expiry
+- Fits Gamma distribution to the implied timing CDF
+- Trades markets where implied rate deviates from model rate
+- Scales positions by rate edge magnitude
 
 Key features:
-- Entry: TTE ≤ 30 days + extreme probabilities
-- Exit: TTE ≤ 7 days (near expiry)
-- Position sizing: Proportional to gamma edge magnitude
+- Entry: rate_edge > 0.1 (significant rate mispricing)
+- Exit: Price reverts to model fair value
+- Position sizing: Proportional to |market_rate - model_rate|
 - Risk management: 15% max exposure per semantic group
 
 Configuration:
@@ -44,7 +46,7 @@ strategy = FactoredGammaStrategy(config=config)
 data_loader = DataLoader(DB_PATH)
 
 print(f"\n{'='*70}")
-print(f"Polymarket Backtest — Factored Gamma Carry Strategy")
+print(f"Polymarket Backtest — Factored Gamma Timing Arbitrage")
 print(f"{'='*70}")
 print(f"Strategy:              {strategy.name}")
 print(f"DB:                    {DB_PATH}")

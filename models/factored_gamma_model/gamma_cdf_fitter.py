@@ -111,8 +111,10 @@ class GammaCDFFitter:
         cdf_values = np.clip(cdf_values, 1e-6, 1 - 1e-6)
 
         # Check for sufficient variance in CDF
-        if np.std(cdf_values) < 1e-6:
-            raise ValueError("CDF has insufficient variance (nearly constant)")
+        # Allow flat term structures - they indicate constant hazard rate
+        # Only reject if completely identical (likely data error)
+        if np.std(cdf_values) < 1e-10:
+            raise ValueError("CDF is completely constant (all identical values)")
 
         # Check for monotonicity (CDF should be non-decreasing)
         cdf_diffs = np.diff(cdf_values)

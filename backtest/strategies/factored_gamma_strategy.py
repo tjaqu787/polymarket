@@ -1,22 +1,26 @@
 """
-Factored Gamma Carry Strategy
+Factored Gamma Timing Arbitrage Strategy
 
-Carry trading strategy using the Factored Gamma Model for prediction markets.
-Trades extreme probability markets near expiry, scaling positions by gamma edge.
+Timing distribution arbitrage using the Factored Gamma Model for prediction markets.
+Identifies markets mispriced relative to the aggregate timing distribution.
 
 Trading Logic:
-- BUY YES when Yes_prob > 0.90 AND TTE ≤ 30 days (high confidence events)
-- BUY NO when Yes_prob < 0.10 AND TTE ≤ 30 days (low confidence events)
-- EXIT when TTE ≤ 7 days (near expiry)
+1. Build term structure from semantic group ("by April", "by May", etc.)
+2. Extract implied risk rates: λ = -ln(yes_price) / time_to_expiry
+3. Fit Gamma(α, β) distribution to timing CDF
+4. Compare market-implied rate vs model-implied rate = rate_edge
+5. BUY YES when market < model (underpriced)
+6. BUY NO when market > model (overpriced)
+7. EXIT when price reverts to model fair value
 
 Position Sizing:
-    size ∝ gamma_edge * max_event_exposure
+    size ∝ rate_edge * max_event_exposure
 
-Larger gamma edge (|market - model|) → larger position
-Smaller gamma edge → smaller position
+Larger rate edge (|market_rate - model_rate|) → larger position
+Smaller rate edge → smaller position
 
-The gamma model fits a term structure across semantic groups to identify
-markets that are mispriced relative to the implied volatility surface.
+The gamma model represents the market's collective belief about WHEN an event
+will occur, allowing us to identify markets that deviate from this consensus.
 """
 
 import sys
@@ -37,10 +41,10 @@ from utils.kelly_criterion import KellyCriterion
 
 class FactoredGammaStrategy(Strategy):
     """
-    Factored Gamma carry trading strategy with gamma edge-based position sizing.
+    Factored Gamma timing arbitrage strategy with rate edge-based position sizing.
 
-    Trades extreme probability markets (< 0.10 or > 0.90) near expiry (TTE ≤ 30 days),
-    using a Gamma model fitted across semantic groups to identify mispriced markets.
+    Fits Gamma distribution to implied timing CDFs across semantic groups,
+    then trades markets that deviate from the model-implied risk rates.
 
     Configuration Parameters:
         - db_path: Path to polymarket.db (default: 'data/polymarket.db')
@@ -53,7 +57,7 @@ class FactoredGammaStrategy(Strategy):
         - eb_holdout_end_date: Factor estimation cutoff (default: "2025-10-05")
         - use_kelly_sizing: Use Kelly criterion for position sizing (default: True)
         - kelly_fraction: Fractional Kelly to use (default: 0.25)
-        - min_edge: Minimum edge for Kelly (default: 0.05)
+        - min_edge: Minimum rate edge for trade entry (default: 0.10)
     """
 
     def __init__(self, config: Optional[Dict] = None):
@@ -110,7 +114,7 @@ class FactoredGammaStrategy(Strategy):
     @property
     def name(self) -> str:
         """Return strategy name for logging."""
-        return f"FactoredGammaCarry_TTE30"
+        return f"FactoredGammaTimingArb"
 
     def convert_no_price_to_yes(self, no_price: float) -> float:
         """
@@ -241,13 +245,13 @@ class FactoredGammaStrategy(Strategy):
         event_id: str
     ) -> List[Signal]:
         """
-        Calculate position sizes based on gamma edge magnitude.
+        Calculate position sizes based on rate edge magnitude.
 
-        KEY IMPROVEMENT: Position sizing proportional to gamma edge
-            size ∝ gamma_edge
+        KEY IMPROVEMENT: Position sizing proportional to rate edge
+            size ∝ rate_edge
 
-        Larger mispricing (vs model) → larger size
-        Smaller mispricing → smaller size
+        Larger rate mispricing (vs model) → larger size
+        Smaller rate mispricing → smaller size
 
         Args:
             potential_signals: List of signal dicts from first pass
@@ -266,20 +270,20 @@ class FactoredGammaStrategy(Strategy):
 
         # Calculate position sizes for new positions
         if len(new_position_signals) > 0:
-            # Calculate total gamma edge (for normalization)
-            total_edge = sum(s['gamma_edge'] for s in new_position_signals)
+            # Calculate total rate edge (for normalization)
+            total_edge = sum(s['rate_edge'] for s in new_position_signals)
 
             if total_edge > 0:
-                # Allocate exposure proportional to gamma edge
+                # Allocate exposure proportional to rate edge
                 for signal_info in new_position_signals:
                     row = signal_info['row']
                     prediction = signal_info['prediction']
-                    gamma_edge = signal_info['gamma_edge']
+                    rate_edge = signal_info['rate_edge']
                     outcome = signal_info['outcome']
                     direction = signal_info['direction']
 
-                    # Weight by gamma edge
-                    weight = gamma_edge / total_edge
+                    # Weight by rate edge
+                    weight = rate_edge / total_edge
 
                     # Allocate fraction of max_event_exposure
                     per_market_exposure = self.max_event_exposure * weight
@@ -301,10 +305,12 @@ class FactoredGammaStrategy(Strategy):
                     token_id = market_tokens.get(outcome, row['token_id'])
 
                     reason = (
-                        f"Carry trade ({direction}): "
+                        f"Timing arb ({direction}): "
                         f"YesProb={1.0 - row['price']:.3f}, "
                         f"Model={prediction.median:.3f}, "
-                        f"Edge={gamma_edge:.3f}, "
+                        f"MktRate={prediction.market_implied_rate:.2f}, "
+                        f"ModRate={prediction.model_implied_rate:.2f}, "
+                        f"RateEdge={rate_edge:.2f}, "
                         f"Allocation={per_market_exposure*100:.1f}%"
                     )
 
@@ -318,7 +324,9 @@ class FactoredGammaStrategy(Strategy):
                         reason=reason,
                         metadata={
                             'model_median': prediction.median,
-                            'gamma_edge': gamma_edge,
+                            'market_rate': prediction.market_implied_rate,
+                            'model_rate': prediction.model_implied_rate,
+                            'rate_edge': rate_edge,
                             'interval_width': prediction.interval_width,
                             'alpha_adjusted': prediction.alpha_adjusted,
                             'beta_adjusted': prediction.beta_adjusted,
@@ -340,6 +348,7 @@ class FactoredGammaStrategy(Strategy):
             outcome = signal_info['outcome']
             position_size = signal_info['position']
             direction = signal_info['direction']
+            rate_edge = signal_info['rate_edge']
 
             # Get the correct price for the outcome
             if outcome == 'Yes':
@@ -348,9 +357,10 @@ class FactoredGammaStrategy(Strategy):
                 price = row['price']
 
             reason = (
-                f"Exit carry trade ({direction}): "
+                f"Exit timing arb ({direction}): "
                 f"YesProb={1.0 - row['price']:.3f}, "
-                f"Model={prediction.median:.3f}"
+                f"Model={prediction.median:.3f}, "
+                f"RateEdge={rate_edge:.2f}"
             )
 
             signals.append(Signal(
@@ -363,6 +373,9 @@ class FactoredGammaStrategy(Strategy):
                 reason=reason,
                 metadata={
                     'model_median': prediction.median,
+                    'market_rate': prediction.market_implied_rate,
+                    'model_rate': prediction.model_implied_rate,
+                    'rate_edge': rate_edge,
                     'event_id': event_id,
                     'direction': direction
                 }
@@ -483,24 +496,31 @@ class FactoredGammaStrategy(Strategy):
                 else:
                     tte_years = row['time_to_expiration']
 
-                # CARRY TRADE ENTRY CRITERIA:
-                # 1. TTE <= 30 days (0.082 years)
-                # 2. Extreme probability (Yes < 0.10 or Yes > 0.90)
-                if tte_years > 30.0 / 365.25:
-                    continue
-
                 # Try to get prediction from model (may be None if fit failed)
                 prediction = None
                 model_median = yes_price  # Default: use market price as model
-                gamma_edge = 0.05  # Default edge for equal weighting
+                rate_edge = 0.0  # Default: no edge if model failed
 
                 if fit_result is not None:
                     prediction = self.model.predict(market_id, fit_result, current_date)
                     if prediction is not None:
                         # Model's median prediction (in Yes probability space)
                         model_median = prediction.median
-                        # Calculate gamma edge (how far actual price is from model)
-                        gamma_edge = abs(yes_price - model_median)
+                        # Use rate edge from model (difference in implied rates)
+                        rate_edge = prediction.rate_edge
+                    else:
+                        # Model fit succeeded but this market wasn't in the term structure
+                        continue
+                else:
+                    # Model didn't fit for this group - skip
+                    continue
+
+                # TIMING ARBITRAGE ENTRY CRITERIA:
+                # 1. Significant rate edge (market mispriced vs model)
+                # 2. Model confidence (narrow CI width)
+                min_rate_edge = 0.1  # Minimum 0.1 rate difference to trade
+                if rate_edge < min_rate_edge:
+                    continue
 
                 current_position_no = self.get_position(market_id, 'No')
                 current_position_yes = self.get_position(market_id, 'Yes')
@@ -508,102 +528,55 @@ class FactoredGammaStrategy(Strategy):
                 # Check which signal type this would trigger
                 signal_info = None
 
-                # ENTRY LOGIC: Buy Yes when prob > 0.90, No when prob < 0.10
-                if yes_price > 0.90 and current_position_yes == 0:
-                    # Create prediction if model didn't fit
-                    if prediction is None:
-                        from models.factored_gamma_model.model import PredictionResult
-                        prediction = PredictionResult(
-                            market_id=market_id,
-                            lower_bound=yes_price - 0.05,
-                            upper_bound=yes_price + 0.05,
-                            median=yes_price,
-                            interval_width=0.10,
-                            alpha_adjusted=1.0,
-                            beta_adjusted=1.0,
-                            time_to_target=tte_years
-                        )
-                    # BUY YES: High probability event, bet with consensus
+                # ENTRY LOGIC: Trade based on model vs market divergence
+                # If market < model median → UNDERPRICED → BUY
+                # If market > model median → OVERPRICED → SELL/SHORT
+
+                if yes_price < model_median and current_position_yes == 0:
+                    # BUY YES: Market underprices event (yes_price < model)
                     signal_info = {
                         'type': SignalType.BUY,
                         'row': row,
                         'prediction': prediction,
                         'outcome': 'Yes',
-                        'gamma_edge': gamma_edge,
-                        'direction': 'long_yes',
+                        'rate_edge': rate_edge,
+                        'direction': 'arb_long_yes',
                         'market_tokens': market_tokens.get(market_id, {})
                     }
-                elif yes_price < 0.10 and current_position_no == 0:
-                    if prediction is None:
-                        from models.factored_gamma_model.model import PredictionResult
-                        prediction = PredictionResult(
-                            market_id=market_id,
-                            lower_bound=yes_price - 0.05,
-                            upper_bound=yes_price + 0.05,
-                            median=yes_price,
-                            interval_width=0.10,
-                            alpha_adjusted=1.0,
-                            beta_adjusted=1.0,
-                            time_to_target=tte_years
-                        )
-                    # BUY NO: Low probability event, bet against consensus
+                elif yes_price > model_median and current_position_no == 0:
+                    # BUY NO: Market overprices event (yes_price > model)
                     signal_info = {
                         'type': SignalType.BUY,
                         'row': row,
                         'prediction': prediction,
                         'outcome': 'No',
-                        'gamma_edge': gamma_edge,
-                        'direction': 'long_no',
+                        'rate_edge': rate_edge,
+                        'direction': 'arb_long_no',
                         'market_tokens': market_tokens.get(market_id, {})
                     }
-                # EXIT LOGIC: Exit at TTE = 7 days or if probability normalizes
-                elif tte_years <= 7.0 / 365.25:
-                    # Exit near expiry
-                    if current_position_yes > 0:
-                        # Create a fake prediction for exit signals if model didn't fit
-                        if prediction is None:
-                            from models.factored_gamma_model.model import PredictionResult
-                            prediction = PredictionResult(
-                                market_id=market_id,
-                                lower_bound=yes_price - 0.05,
-                                upper_bound=yes_price + 0.05,
-                                median=yes_price,
-                                interval_width=0.10,
-                                alpha_adjusted=1.0,
-                                beta_adjusted=1.0,
-                                time_to_target=tte_years
-                            )
-                        signal_info = {
-                            'type': SignalType.SELL,
-                            'row': row,
-                            'prediction': prediction,
-                            'outcome': 'Yes',
-                            'position': current_position_yes,
-                            'gamma_edge': gamma_edge,
-                            'direction': 'exit_yes'
-                        }
-                    elif current_position_no > 0:
-                        if prediction is None:
-                            from models.factored_gamma_model.model import PredictionResult
-                            prediction = PredictionResult(
-                                market_id=market_id,
-                                lower_bound=yes_price - 0.05,
-                                upper_bound=yes_price + 0.05,
-                                median=yes_price,
-                                interval_width=0.10,
-                                alpha_adjusted=1.0,
-                                beta_adjusted=1.0,
-                                time_to_target=tte_years
-                            )
-                        signal_info = {
-                            'type': SignalType.SELL,
-                            'row': row,
-                            'prediction': prediction,
-                            'outcome': 'No',
-                            'position': current_position_no,
-                            'gamma_edge': gamma_edge,
-                            'direction': 'exit_no'
-                        }
+                # EXIT LOGIC: Price reverts to model (edge disappears)
+                elif current_position_yes > 0 and yes_price >= model_median:
+                    # Exit YES position: price reached or exceeded model fair value
+                    signal_info = {
+                        'type': SignalType.SELL,
+                        'row': row,
+                        'prediction': prediction,
+                        'outcome': 'Yes',
+                        'position': current_position_yes,
+                        'rate_edge': rate_edge,
+                        'direction': 'arb_exit_yes'
+                    }
+                elif current_position_no > 0 and yes_price <= model_median:
+                    # Exit NO position: price reached or fell below model fair value
+                    signal_info = {
+                        'type': SignalType.SELL,
+                        'row': row,
+                        'prediction': prediction,
+                        'outcome': 'No',
+                        'position': current_position_no,
+                        'rate_edge': rate_edge,
+                        'direction': 'arb_exit_no'
+                    }
 
                 if signal_info is not None:
                     potential_signals.append(signal_info)
