@@ -78,11 +78,35 @@ class BayesianGammaFitter:
 
         Same as frequentist version - needed for sampling.
         """
-        pdf_values = np.diff(cdf_values) / np.diff(times)
+        # Calculate differences
+        dt = np.diff(times)
+        dcdf = np.diff(cdf_values)
+
+        # Check for numerical issues
+        if np.any(dt <= 0):
+            raise ValueError(f"Times not strictly increasing: min dt = {np.min(dt)}")
+
+        if np.any(np.isnan(dt)) or np.any(np.isnan(dcdf)):
+            raise ValueError("NaN values in time or CDF differences")
+
+        # Calculate PDF
+        pdf_values = dcdf / dt
         time_midpoints = (times[:-1] + times[1:]) / 2
 
+        # Ensure non-negative and normalize
         pdf_values = np.maximum(pdf_values, 0)
-        pdf_values = pdf_values / (np.sum(pdf_values) * np.mean(np.diff(times)))
+
+        # Check for all-zero PDF
+        pdf_sum = np.sum(pdf_values)
+        if pdf_sum < 1e-10:
+            raise ValueError(f"PDF sum too small: {pdf_sum}")
+
+        # Normalize
+        pdf_values = pdf_values / (pdf_sum * np.mean(dt))
+
+        # Final check for NaN/inf
+        if np.any(np.isnan(pdf_values)) or np.any(np.isinf(pdf_values)):
+            raise ValueError("NaN or inf in final PDF values")
 
         return time_midpoints, pdf_values
 
