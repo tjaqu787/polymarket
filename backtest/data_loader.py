@@ -319,6 +319,106 @@ class DataLoader:
 
         return df
 
+    def load_carry_markets(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        min_volume: float = 0
+    ) -> pd.DataFrame:
+        """
+        Load markets for carry trading strategy.
+
+        Unlike timing markets, this loads ALL active markets with semantic grouping,
+        allowing the strategy to filter based on TTE and probability thresholds.
+
+        Args:
+            start_date: Start date (YYYY-MM-DD format)
+            end_date: End date (YYYY-MM-DD format)
+            min_volume: Minimum market volume
+
+        Returns:
+            DataFrame with market data including semantic groups
+        """
+        conn = sqlite3.connect(self.db_path)
+
+        query = """
+        SELECT
+            m.market_id,
+            m.event_id,
+            COALESCE(smg.semantic_group_id, m.event_id) as group_col,
+            smg.semantic_group_id,
+            smg.canonical_slug,
+            smg.actor,
+            m.question,
+            m.category,
+            e.slug AS event_slug,
+            e.title AS event_title,
+            DATE(m.end_date) AS resolution_date,
+            m.end_date,
+            m.volume_num,
+            m.liquidity_num,
+            m.active,
+            m.closed,
+            mt.token_id,
+            mt.outcome,
+            ph.date,
+            ph.ts,
+            ph.price
+        FROM markets m
+        INNER JOIN market_tokens mt ON m.market_id = mt.market_id
+        INNER JOIN price_history ph ON mt.token_id = ph.token_id
+        INNER JOIN events e ON m.event_id = e.id
+        LEFT JOIN semantic_market_groups smg ON m.market_id = smg.market_id
+        WHERE 1=1
+        """
+
+        params = []
+
+        if start_date:
+            query += " AND ph.date >= ?"
+            params.append(start_date)
+
+        if end_date:
+            query += " AND ph.date <= ?"
+            params.append(end_date)
+
+        if min_volume > 0:
+            query += " AND m.volume_num >= ?"
+            params.append(min_volume)
+
+        # Don't filter by active - markets can become inactive after expiry
+        # but we still need their historical data for backtesting
+        query += " ORDER BY ph.date, m.market_id, mt.outcome"
+
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+
+        # Convert dates
+        df['date'] = pd.to_datetime(df['date'])
+        df['resolution_date'] = pd.to_datetime(df['resolution_date'])
+
+        # Calculate time to expiration
+        df['time_to_expiration'] = (df['resolution_date'] - df['date']).dt.days / 365.25
+        df['time_to_expiration'] = df['time_to_expiration'].clip(lower=1/365.25)
+
+        # Calculate implied rate for both Yes and No outcomes
+        df['implied_rate'] = np.nan
+
+        # Handle Yes outcomes
+        yes_mask = df['outcome'] == 'Yes'
+        if yes_mask.any():
+            yes_price_clipped = df.loc[yes_mask, 'price'].clip(1e-6, 1-1e-6)
+            df.loc[yes_mask, 'implied_rate'] = -np.log(yes_price_clipped) / df.loc[yes_mask, 'time_to_expiration']
+
+        # Handle No outcomes (convert to Yes first)
+        no_mask = df['outcome'] == 'No'
+        if no_mask.any():
+            yes_price = 1 - df.loc[no_mask, 'price']
+            yes_price_clipped = yes_price.clip(1e-6, 1-1e-6)
+            df.loc[no_mask, 'implied_rate'] = -np.log(yes_price_clipped) / df.loc[no_mask, 'time_to_expiration']
+
+        return df
+
     def get_available_dates(
         self,
         start_date: Optional[str] = None,

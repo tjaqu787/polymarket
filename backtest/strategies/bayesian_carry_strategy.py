@@ -153,6 +153,7 @@ class BayesianCarryStrategy(Strategy):
         past events to inform priors for new events.
         """
         if not self.use_eb_priors:
+            print("⚠ EB priors disabled in config")
             return
 
         print(f"\n{'='*70}")
@@ -171,26 +172,43 @@ class BayesianCarryStrategy(Strategy):
         # Get resolved events before holdout date
         try:
             historical_data = loader.load_timing_markets()
+            print(f"Total data loaded: {len(historical_data)} rows")
+
+            # Filter to resolved events before cutoff
             historical_data = historical_data[
                 (historical_data['resolution_date'] <= self.eb_holdout_end) &
                 (historical_data['resolution_date'].notna())
             ]
 
-            print(f"Loaded {len(historical_data)} historical observations")
+            print(f"After filtering (resolved before {self.eb_holdout_end}): {len(historical_data)} observations")
             print(f"Unique events: {historical_data['event_id'].nunique()}")
+
+            if len(historical_data) == 0:
+                print("✗ No historical data available for EB fitting")
+                print("  Falling back to weak priors")
+                self.use_eb_priors = False
+                self.eb_factors = None
+                return
 
             # Fit EB factors
             self.eb_factors = EmpiricalBayesFactors()
             self.eb_factors.fit(historical_data, self.eb_fitter, min_events_per_category=3)
 
-            print(f"\n✓ EB factors fitted successfully")
-            if self.eb_factors.factors:
+            if self.eb_factors.fitted:
+                print(f"\n✓ EB factors fitted successfully")
                 print(f"  Categories: {list(self.eb_factors.categories)}")
                 print(f"  Factors: {list(self.eb_factors.factors.keys())}")
+            else:
+                print(f"✗ EB fitting failed - no factors learned")
+                self.use_eb_priors = False
+                self.eb_factors = None
+
             print(f"{'='*70}\n")
 
         except Exception as e:
+            import traceback
             print(f"✗ Failed to fit EB factors: {e}")
+            print(f"  Traceback: {traceback.format_exc()}")
             print("  Falling back to weak priors")
             self.use_eb_priors = False
             self.eb_factors = None
@@ -455,8 +473,11 @@ class BayesianCarryStrategy(Strategy):
         for event_id in short_dated[group_col].unique():
             event_data = short_dated[short_dated[group_col] == event_id]
 
-            # Need at least 2 markets for term structure
-            if len(event_data['market_id'].unique()) < 2:
+            # Need at least 3 markets for term structure (min_buckets=3)
+            num_markets = len(event_data['market_id'].unique())
+            if num_markets < 3:
+                if self.verbose and num_markets > 0:
+                    print(f"  Skipping {event_id}: only {num_markets} markets (need ≥3)")
                 continue
 
             # Check if refit needed
@@ -471,6 +492,8 @@ class BayesianCarryStrategy(Strategy):
                         print(f"    Prior α: {eb_priors['alpha_prior_mean']:.3f}, β: {eb_priors['beta_prior_mean']:.3f}")
                     else:
                         print(f"  Fitting {event_id} with weak priors (no EB)")
+                        if self.use_eb_priors:
+                            print(f"    (EB enabled but priors unavailable for this event)")
 
                 # Fit event with EB-informed priors
                 try:
@@ -478,9 +501,10 @@ class BayesianCarryStrategy(Strategy):
                 except Exception as e:
                     if self.verbose:
                         print(f"    ✗ Fit failed for event_id={event_id}")
-                        print(f"      Error: {e}")
+                        print(f"      Error type: {type(e).__name__}")
+                        print(f"      Error: {str(e)[:200]}")
                         print(f"      Markets: {len(event_data['market_id'].unique())}")
-                        print(f"      Category: {event_data.iloc[0].get('category', 'unknown')}")
+                        print(f"      TTE range: {event_data['tte_days'].min():.1f} - {event_data['tte_days'].max():.1f} days")
                     continue
 
                 if fit_result is None:
@@ -488,6 +512,7 @@ class BayesianCarryStrategy(Strategy):
                         print(f"    ✗ Fit returned None for event_id={event_id}")
                         print(f"      Markets: {len(event_data['market_id'].unique())}")
                         print(f"      Price range: {event_data['price'].min():.3f} - {event_data['price'].max():.3f}")
+                        print(f"      TTE range: {event_data['tte_days'].min():.1f} - {event_data['tte_days'].max():.1f} days")
                     continue
 
                 self.fitted_events[event_id] = fit_result

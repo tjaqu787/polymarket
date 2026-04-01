@@ -96,10 +96,47 @@ class GammaCDFFitter:
         # Validate inputs
         if len(times) < 2:
             raise ValueError("Need at least 2 time points to fit")
-        if not np.all(np.diff(times) > 0):
-            raise ValueError("Times must be strictly increasing")
+
+        # Check for strictly increasing times
+        time_diffs = np.diff(times)
+        if not np.all(time_diffs > 0):
+            min_dt = np.min(time_diffs)
+            raise ValueError(f"Times not strictly increasing: min dt = {min_dt}")
+
         if not np.all((cdf_values >= 0) & (cdf_values <= 1)):
             raise ValueError("CDF values must be in [0, 1]")
+
+        # Check for extreme values that cause numerical issues
+        # Clip CDF values away from exact 0 or 1
+        cdf_values = np.clip(cdf_values, 1e-6, 1 - 1e-6)
+
+        # Check for sufficient variance in CDF
+        # Allow flat term structures - they indicate constant hazard rate
+        # Only reject if completely identical (likely data error)
+        if np.std(cdf_values) < 1e-10:
+            raise ValueError("CDF is completely constant (all identical values)")
+
+        # Check for monotonicity (CDF should be non-decreasing)
+        cdf_diffs = np.diff(cdf_values)
+        monotonic_violations = None
+        if not np.all(cdf_diffs >= -1e-6):  # Allow small numerical errors
+            # Find the violations - store them instead of failing immediately
+            violation_indices = np.where(cdf_diffs < -1e-6)[0]
+            max_violation = np.min(cdf_diffs)
+
+            # Package violation info for calendar spread arbitrage
+            monotonic_violations = {
+                'violation_indices': violation_indices,
+                'max_violation': max_violation,
+                'num_violations': len(violation_indices)
+            }
+
+            # For now, still raise the error (we'll handle this in the model)
+            raise ValueError(
+                f"CDF not monotonic: {len(violation_indices)} violations, "
+                f"max decrease = {max_violation:.6f} "
+                f"(potential arbitrage opportunity)"
+            )
 
         # Convert CDF to PDF
         time_midpoints, pdf_values = self.cdf_to_pdf(times, cdf_values)
@@ -122,6 +159,18 @@ class GammaCDFFitter:
         # We force loc=0 (no shift), so Gamma(shape, scale)
         try:
             shape, loc, scale = gamma.fit(sample_times, floc=0)
+
+            # Validate fitted parameters
+            if not np.isfinite(shape) or not np.isfinite(scale):
+                raise ValueError("Fitted parameters are not finite")
+            if shape <= 0 or scale <= 0:
+                raise ValueError(f"Invalid parameters: shape={shape}, scale={scale}")
+            # Check for extreme values that might cause overflow
+            if shape > 1000 or scale > 1000:
+                raise ValueError(f"Fitted parameters too large: shape={shape}, scale={scale}")
+            if shape < 0.001 or scale < 0.001:
+                raise ValueError(f"Fitted parameters too small: shape={shape}, scale={scale}")
+
         except Exception as e:
             raise ValueError(f"Gamma fit failed: {e}")
 

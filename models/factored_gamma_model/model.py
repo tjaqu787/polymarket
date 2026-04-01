@@ -38,13 +38,15 @@ class FitResult:
     beta_adjusted: float
     rmse: float
     aic: float
-    credible_intervals: Dict[str, Dict[str, np.ndarray]]  # market_id -> {lower, upper, median, time}
+    credible_intervals: Dict[str, Dict[str, np.ndarray]]  # market_id -> {lower, upper, median, time, market_rate, model_rate}
     times: np.ndarray
     cdf_values: np.ndarray
+    market_implied_rates: np.ndarray  # Market-implied hazard rates at each tenor
+    model_implied_rates: np.ndarray   # Model-implied hazard rates from fitted Gamma
     category: str
     ts_slope: float
     ts_curvature: float
-    implied_rate: float
+    implied_rate: float  # Average implied rate across term structure
 
 
 @dataclass
@@ -52,7 +54,7 @@ class PredictionResult:
     """
     Container for market-specific prediction.
 
-    Provides CI bounds and interval width for position sizing.
+    Provides CI bounds, interval width, and rate edge for position sizing.
     """
     market_id: str
     lower_bound: float
@@ -62,6 +64,25 @@ class PredictionResult:
     alpha_adjusted: float
     beta_adjusted: float
     time_to_target: float  # Years to target date
+    market_implied_rate: float  # Rate implied by market price
+    model_implied_rate: float   # Rate implied by Gamma model
+    rate_edge: float  # |market_rate - model_rate| = our edge
+
+
+@dataclass
+class CalendarSpreadOpportunity:
+    """
+    Container for calendar spread arbitrage opportunities.
+
+    Occurs when P(by earlier date) > P(by later date), violating monotonicity.
+    Arbitrage: BUY later date, SELL earlier date.
+    """
+    event_id: str
+    fit_date: pd.Timestamp
+    spread_pairs: List[Dict]  # [{near_market_id, far_market_id, near_time, far_time, near_cdf, far_cdf, spread_edge}]
+    times: np.ndarray
+    cdf_values: np.ndarray
+    market_ids: List[str]
 
 
 class FactoredGammaModel:
@@ -153,6 +174,55 @@ class FactoredGammaModel:
 
         print("✓ Empirical Bayes factors fitted successfully")
 
+    def detect_calendar_spread_opportunities(
+        self,
+        times: np.ndarray,
+        cdf_values: np.ndarray,
+        market_ids: List[str],
+        event_id: str,
+        current_date: pd.Timestamp
+    ) -> Optional[CalendarSpreadOpportunity]:
+        """
+        Detect calendar spread arbitrage from non-monotonic CDF.
+
+        When CDF(t1) > CDF(t2) for t1 < t2, this is impossible and represents
+        a mispricing between the two markets.
+
+        Arbitrage: BUY the later-dated market, SELL the earlier-dated market.
+        """
+        cdf_diffs = np.diff(cdf_values)
+        violation_indices = np.where(cdf_diffs < -1e-6)[0]
+
+        if len(violation_indices) == 0:
+            return None
+
+        spread_pairs = []
+        for idx in violation_indices:
+            near_idx = idx
+            far_idx = idx + 1
+
+            # Calculate spread edge (how much the CDF decreases)
+            spread_edge = abs(cdf_diffs[idx])
+
+            spread_pairs.append({
+                'near_market_id': market_ids[near_idx],
+                'far_market_id': market_ids[far_idx],
+                'near_time': times[near_idx],
+                'far_time': times[far_idx],
+                'near_cdf': cdf_values[near_idx],
+                'far_cdf': cdf_values[far_idx],
+                'spread_edge': spread_edge
+            })
+
+        return CalendarSpreadOpportunity(
+            event_id=event_id,
+            fit_date=current_date,
+            spread_pairs=spread_pairs,
+            times=times,
+            cdf_values=cdf_values,
+            market_ids=market_ids
+        )
+
     def fit_event(
         self,
         event_data: pd.DataFrame,
@@ -208,6 +278,7 @@ class FactoredGammaModel:
 
         times = term_structure['times']
         cdf_values = term_structure['cdf_values']
+        implied_rates = term_structure['implied_rates']
         market_ids = term_structure['market_ids']
         target_dates = term_structure['target_dates']
 
@@ -219,7 +290,18 @@ class FactoredGammaModel:
         try:
             fit_result = self.fitter.fit(times, cdf_values)
         except Exception as e:
+            error_msg = str(e)
             print(f"Gamma fit failed for {event_id}: {e}")
+
+            # Check if this is a non-monotonic CDF (calendar spread opportunity)
+            if "not monotonic" in error_msg.lower():
+                calendar_spread = self.detect_calendar_spread_opportunities(
+                    times, cdf_values, market_ids, event_id, current_date
+                )
+                if calendar_spread is not None:
+                    # Return calendar spread opportunity instead of None
+                    return calendar_spread
+
             return None
 
         # Check fit quality
@@ -273,7 +355,13 @@ class FactoredGammaModel:
                 implied_rate=implied_rate
             )
 
-            # Map CI bounds to market_ids
+            # Calculate model-implied rates from fitted Gamma CDF
+            # Rate = -ln(1 - CDF) / time
+            model_cdf = ci_result['median']
+            model_cdf_clipped = np.clip(model_cdf, 1e-6, 1 - 1e-6)
+            model_rates = -np.log(1 - model_cdf_clipped) / times
+
+            # Map CI bounds and rates to market_ids
             credible_intervals = {}
             for i, (market_id, time, target_date) in enumerate(zip(market_ids, times, target_dates)):
                 credible_intervals[market_id] = {
@@ -281,7 +369,9 @@ class FactoredGammaModel:
                     'upper': ci_result['upper'][i],
                     'median': ci_result['median'][i],
                     'time': time,
-                    'target_date': target_date
+                    'target_date': target_date,
+                    'market_rate': implied_rates[i],
+                    'model_rate': model_rates[i]
                 }
 
         except Exception as e:
@@ -301,10 +391,12 @@ class FactoredGammaModel:
             credible_intervals=credible_intervals,
             times=times,
             cdf_values=cdf_values,
+            market_implied_rates=implied_rates,
+            model_implied_rates=model_rates,
             category=category,
             ts_slope=ts_slope,
             ts_curvature=ts_curvature,
-            implied_rate=implied_rate
+            implied_rate=np.mean(implied_rates)  # Average rate across term structure
         )
 
     def predict(
@@ -338,6 +430,11 @@ class FactoredGammaModel:
         interval_width = upper_bound - lower_bound
         time_to_target = ci['time']
 
+        # Get rate information
+        market_rate = ci.get('market_rate', 0.0)
+        model_rate = ci.get('model_rate', 0.0)
+        rate_edge = abs(market_rate - model_rate)
+
         return PredictionResult(
             market_id=market_id,
             lower_bound=lower_bound,
@@ -346,7 +443,10 @@ class FactoredGammaModel:
             interval_width=interval_width,
             alpha_adjusted=fit_result.alpha_adjusted,
             beta_adjusted=fit_result.beta_adjusted,
-            time_to_target=time_to_target
+            time_to_target=time_to_target,
+            market_implied_rate=market_rate,
+            model_implied_rate=model_rate,
+            rate_edge=rate_edge
         )
 
     def _extract_term_structure(
@@ -357,8 +457,8 @@ class FactoredGammaModel:
         """
         Extract term structure from event data.
 
-        Parses target dates from questions ("by March 2026"), calculates
-        times to target, converts No prices to Yes prices, and sorts.
+        Uses resolution_date (or end_date) from data, calculates
+        times to expiry, converts No prices to Yes prices, and sorts.
 
         Returns:
             Dict with times, cdf_values, market_ids, target_dates
@@ -367,10 +467,17 @@ class FactoredGammaModel:
         term_structure_data = []
 
         for _, row in event_data.iterrows():
-            # Parse target date from question
+            # Try to parse target date from question text first (more accurate)
             target_date = self._extract_target_date(row['question'])
+
+            # Fallback to resolution_date or end_date if parsing fails
             if target_date is None:
-                continue
+                if 'resolution_date' in row.index and pd.notna(row['resolution_date']):
+                    target_date = pd.to_datetime(row['resolution_date'])
+                elif 'end_date' in row.index and pd.notna(row['end_date']):
+                    target_date = pd.to_datetime(row['end_date'])
+                else:
+                    continue  # Skip if we can't determine target date
 
             # Calculate time to target in years
             time_to_target = (target_date - current_date).days / 365.25
@@ -382,10 +489,19 @@ class FactoredGammaModel:
             no_price = row['price']
             yes_price = 1.0 - no_price
 
+            # Get implied rate if available, otherwise calculate it
+            if 'implied_rate' in row.index and pd.notna(row['implied_rate']):
+                implied_rate = row['implied_rate']
+            else:
+                # Calculate: λ = -ln(yes_price) / t
+                yes_price_clipped = np.clip(yes_price, 1e-6, 1 - 1e-6)
+                implied_rate = -np.log(yes_price_clipped) / time_to_target
+
             term_structure_data.append({
                 'market_id': row['market_id'],
                 'time': time_to_target,
                 'cdf_value': yes_price,
+                'implied_rate': implied_rate,
                 'target_date': target_date
             })
 
@@ -398,25 +514,45 @@ class FactoredGammaModel:
         # Extract arrays
         times = np.array([x['time'] for x in term_structure_data])
         cdf_values = np.array([x['cdf_value'] for x in term_structure_data])
+        implied_rates = np.array([x['implied_rate'] for x in term_structure_data])
         market_ids = [x['market_id'] for x in term_structure_data]
         target_dates = [x['target_date'] for x in term_structure_data]
 
-        # Remove duplicates (keep first occurrence)
+        # Remove near-duplicates (times within 1 day tolerance)
+        # Average CDF values and implied rates for markets with similar target dates
         unique_times = []
         unique_cdf_values = []
+        unique_implied_rates = []
         unique_market_ids = []
         unique_target_dates = []
 
-        for i, t in enumerate(times):
-            if i == 0 or t != times[i-1]:
-                unique_times.append(t)
-                unique_cdf_values.append(cdf_values[i])
-                unique_market_ids.append(market_ids[i])
-                unique_target_dates.append(target_dates[i])
+        time_tolerance = 1.0 / 365.25  # 1 day in years
+
+        i = 0
+        while i < len(times):
+            current_time = times[i]
+
+            # Find all times within tolerance
+            j = i
+            while j < len(times) and abs(times[j] - current_time) < time_tolerance:
+                j += 1
+
+            # Average the CDF values and implied rates for this time bucket
+            avg_cdf = np.mean(cdf_values[i:j])
+            avg_rate = np.mean(implied_rates[i:j])
+
+            unique_times.append(current_time)
+            unique_cdf_values.append(avg_cdf)
+            unique_implied_rates.append(avg_rate)
+            unique_market_ids.append(market_ids[i])  # Keep first market_id
+            unique_target_dates.append(target_dates[i])
+
+            i = j  # Move to next bucket
 
         return {
             'times': np.array(unique_times),
             'cdf_values': np.array(unique_cdf_values),
+            'implied_rates': np.array(unique_implied_rates),
             'market_ids': unique_market_ids,
             'target_dates': unique_target_dates
         }

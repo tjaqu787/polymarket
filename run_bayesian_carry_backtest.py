@@ -52,14 +52,9 @@ max_date = pd.Timestamp(max_date_str)
 # Calculate total days in dataset
 total_days = (max_date - min_date).days
 
-# Use first 30% of data for EB learning, remaining 70% for backtest
-eb_learning_days = int(total_days * 0.3)
-eb_cutoff = min_date + pd.DateOffset(days=eb_learning_days)
-
-# Ensure we have at least 30 days for EB learning
-if eb_learning_days < 30:
-    print(f"Warning: Only {total_days} days of data. Using first 30 days for EB.")
-    eb_cutoff = min_date + pd.DateOffset(days=30)
+# Use fixed EB cutoff date: learn from all data before 2024-06-01
+eb_cutoff = pd.Timestamp('2024-06-01')
+eb_learning_days = (eb_cutoff - min_date).days
 
 # Set dates
 eb_holdout_end = eb_cutoff.strftime('%Y-%m-%d')

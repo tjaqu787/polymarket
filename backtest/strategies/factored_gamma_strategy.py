@@ -1,20 +1,30 @@
 """
-Factored Gamma Timing Strategy
+Hybrid Factored Gamma Strategy - Timing Arbitrage + Calendar Spreads
 
-Trading strategy using the Factored Gamma Model for prediction market timing.
-Unifies PoissonTimingStrategy with Empirical Bayes factor adjustments.
+Combines two arbitrage strategies:
 
-Trading Logic:
-- BUY when market_price < CI_lower (underpriced relative to timing model)
-- SHORT when market_price > CI_upper (overpriced)
-- SELL when long position price reaches CI_upper
-- COVER when short position price reaches CI_lower
+STRATEGY 1: Timing Distribution Arbitrage (when CDF is monotonic)
+1. Build term structure from semantic group ("by April", "by May", etc.)
+2. Extract implied risk rates: λ = -ln(yes_price) / time_to_expiry
+3. Fit Gamma(α, β) distribution to timing CDF
+4. Compare market-implied rate vs model-implied rate = rate_edge
+5. BUY YES when market < model (underpriced)
+6. BUY NO when market > model (overpriced)
+7. EXIT when price reverts to model fair value
+
+STRATEGY 2: Calendar Spread Arbitrage (when CDF is non-monotonic)
+1. Detect violations: P(by earlier) > P(by later)
+2. Identify mispriced pairs
+3. BUY later-dated market (underpriced)
+4. SELL earlier-dated market (overpriced)
+5. Profit when spread converges or markets resolve
 
 Position Sizing:
-    size = max_event_exposure / (num_signals * interval_width)
+    Timing arb: size ∝ rate_edge
+    Calendar spread: size ∝ spread_edge (CDF violation magnitude)
 
-Narrow CI (confident timing) → larger size
-Wide CI (uncertain timing) → smaller size
+This hybrid approach captures both timing distribution edge AND structural
+market inefficiencies from non-monotonic term structures.
 """
 
 import sys
@@ -29,25 +39,29 @@ import re
 
 from backtest.strategy import Strategy, Signal, SignalType
 from backtest.data_loader import DataLoader
-from models.factored_gamma_model.model import FactoredGammaModel
+from models.factored_gamma_model.model import FactoredGammaModel, FitResult, CalendarSpreadOpportunity
+from utils.kelly_criterion import KellyCriterion
 
 
 class FactoredGammaStrategy(Strategy):
     """
-    Factored Gamma timing strategy with dynamic position sizing.
+    Factored Gamma timing arbitrage strategy with rate edge-based position sizing.
 
-    Replaces both TimeDiscountingStrategy and PoissonTimingStrategy
-    by combining Gamma CDF fitting with Empirical Bayes factor adjustments.
+    Fits Gamma distribution to implied timing CDFs across semantic groups,
+    then trades markets that deviate from the model-implied risk rates.
 
     Configuration Parameters:
         - db_path: Path to polymarket.db (default: 'data/polymarket.db')
-        - min_buckets: Min term structure points (default: 3)
+        - min_buckets: Min markets in semantic group (default: 3)
         - max_rmse: Max fit error threshold (default: 0.3)
         - ci_level: Credible interval level (default: 0.70)
         - n_bootstrap: Bootstrap samples (default: 500)
         - refit_hours: Hours between refits (default: 6)
         - max_event_exposure: Max portfolio % per event (default: 0.15)
         - eb_holdout_end_date: Factor estimation cutoff (default: "2025-10-05")
+        - use_kelly_sizing: Use Kelly criterion for position sizing (default: True)
+        - kelly_fraction: Fractional Kelly to use (default: 0.25)
+        - min_edge: Minimum rate edge for trade entry (default: 0.10)
     """
 
     def __init__(self, config: Optional[Dict] = None):
@@ -63,6 +77,22 @@ class FactoredGammaStrategy(Strategy):
         self.max_event_exposure = self.config.get('max_event_exposure', 0.15)
         self.eb_holdout_end_date = self.config.get('eb_holdout_end_date', '2025-10-05')
 
+        # Kelly criterion parameters
+        self.use_kelly_sizing = self.config.get('use_kelly_sizing', True)
+        self.kelly_fraction = self.config.get('kelly_fraction', 0.25)
+        self.min_edge = self.config.get('min_edge', 0.05)
+
+        # Initialize Kelly criterion
+        if self.use_kelly_sizing:
+            self.kelly_calculator = KellyCriterion(
+                kelly_fraction=self.kelly_fraction,
+                min_edge=self.min_edge,
+                max_position=self.max_event_exposure,
+                carry_penalty=0.5
+            )
+        else:
+            self.kelly_calculator = None
+
         # Initialize model
         self.model = FactoredGammaModel(
             min_buckets=self.min_buckets,
@@ -72,9 +102,15 @@ class FactoredGammaStrategy(Strategy):
         )
 
         # Track fitted events
-        self.fitted_events = {}  # event_id -> FitResult
+        self.fitted_events = {}  # event_id -> FitResult (or None if fit failed)
         self.last_fit_date = {}  # event_id -> date
         self.factors_fitted = False
+
+        # Track fitting statistics
+        self.fit_attempts = 0
+        self.fit_successes = 0
+        self.calendar_spread_opportunities = 0
+        self.fit_failures_by_reason = {}
 
         # Data loader (for loading resolved events for EB fitting)
         db_path = self.config.get('db_path', 'data/polymarket.db')
@@ -83,7 +119,7 @@ class FactoredGammaStrategy(Strategy):
     @property
     def name(self) -> str:
         """Return strategy name for logging."""
-        return f"FactoredGamma_CI{int(self.ci_level*100)}"
+        return f"HybridGamma_TimingArb+CalendarSpread"
 
     def convert_no_price_to_yes(self, no_price: float) -> float:
         """
@@ -133,16 +169,15 @@ class FactoredGammaStrategy(Strategy):
         return None
 
     def is_time_distributed_event(self, event_data: pd.DataFrame) -> bool:
-        """Check if an event is time-distributed (has multiple "by X" markets)."""
-        questions_with_by = event_data[
-            event_data['question'].str.contains(' by ', case=False, na=False)
-        ]
-        unique_target_dates = set()
-        for q in questions_with_by['question']:
-            target = self.extract_target_date(q)
-            if target:
-                unique_target_dates.add(target)
-        return len(unique_target_dates) >= self.min_buckets
+        """
+        Check if an event has enough markets for gamma fitting.
+
+        For carry trading, we need markets at different resolutions dates
+        or different thresholds within the same semantic group.
+        """
+        # Count unique markets in this group
+        num_markets = event_data['market_id'].nunique()
+        return num_markets >= self.min_buckets
 
     def fit_empirical_bayes_factors(self, current_date: str) -> bool:
         """
@@ -184,6 +219,130 @@ class FactoredGammaStrategy(Strategy):
 
         return False  # Indicate EB fitting not actually performed
 
+    def _generate_calendar_spread_signals(
+        self,
+        calendar_spread: CalendarSpreadOpportunity,
+        event_data: pd.DataFrame,
+        current_date: pd.Timestamp,
+        group_id: str
+    ) -> List[Signal]:
+        """
+        Generate calendar spread arbitrage signals.
+
+        Calendar spread occurs when P(by earlier) > P(by later), which is impossible.
+        Arbitrage: BUY later-dated market, SELL earlier-dated market.
+
+        If the event occurs:
+        - Later market resolves YES → profit on long
+        - Earlier market resolves YES → both resolve YES, spread closes to zero
+
+        If event doesn't occur:
+        - Both resolve NO → both positions profit
+
+        Args:
+            calendar_spread: CalendarSpreadOpportunity from model
+            event_data: Market data for this group
+            current_date: Current date
+            group_id: Semantic group ID
+
+        Returns:
+            List of Signal objects for calendar spread trades
+        """
+        signals = []
+
+        # Calculate total spread edge for position sizing
+        total_edge = sum(pair['spread_edge'] for pair in calendar_spread.spread_pairs)
+
+        if total_edge <= 0:
+            return signals
+
+        # Group by market_id to get both Yes and No tokens
+        market_tokens = {}
+        market_data = {}
+        for _, row in event_data.iterrows():
+            market_id = row['market_id']
+            outcome = row['outcome']
+            if market_id not in market_tokens:
+                market_tokens[market_id] = {}
+                market_data[market_id] = row
+            market_tokens[market_id][outcome] = row['token_id']
+
+        # Generate signals for each spread pair
+        for pair in calendar_spread.spread_pairs:
+            near_market_id = pair['near_market_id']
+            far_market_id = pair['far_market_id']
+            spread_edge = pair['spread_edge']
+
+            # Check if we already have positions
+            near_position = self.get_position(near_market_id, 'No')
+            far_position = self.get_position(far_market_id, 'Yes')
+
+            # Skip if already in this spread
+            if near_position < 0 or far_position > 0:
+                continue
+
+            # Check if these markets exist in current data
+            if near_market_id not in market_data or far_market_id not in market_data:
+                continue
+
+            near_row = market_data[near_market_id]
+            far_row = market_data[far_market_id]
+
+            # Calculate position size proportional to spread edge
+            weight = spread_edge / total_edge
+            per_spread_exposure = self.max_event_exposure * weight * 0.5  # 0.5 because we have 2 legs
+
+            # LEG 1: SELL near-dated market (SHORT)
+            # We want to short YES, which means buying NO tokens
+            near_yes_price = 1.0 - near_row['price']  # Convert No price to Yes
+            near_size = self._calculate_position_size(
+                price=near_yes_price,
+                exposure_fraction=per_spread_exposure
+            )
+
+            if near_size > 0:
+                signals.append(Signal(
+                    market_id=near_market_id,
+                    token_id=market_tokens[near_market_id].get('No', near_row['token_id']),
+                    outcome='No',  # Buy NO = Short YES
+                    signal_type=SignalType.BUY,
+                    size=near_size,
+                    price=near_row['price'],
+                    reason=f"Calendar spread (SHORT near): CDF={pair['near_cdf']:.3f} > {pair['far_cdf']:.3f}, Edge={spread_edge:.3f}",
+                    metadata={
+                        'spread_type': 'calendar_near_leg',
+                        'spread_edge': spread_edge,
+                        'event_id': group_id,
+                        'pair_far_market': far_market_id
+                    }
+                ))
+
+            # LEG 2: BUY far-dated market (LONG)
+            far_yes_price = 1.0 - far_row['price']
+            far_size = self._calculate_position_size(
+                price=far_yes_price,
+                exposure_fraction=per_spread_exposure
+            )
+
+            if far_size > 0:
+                signals.append(Signal(
+                    market_id=far_market_id,
+                    token_id=market_tokens[far_market_id].get('Yes', far_row['token_id']),
+                    outcome='Yes',  # Buy YES = Long
+                    signal_type=SignalType.BUY,
+                    size=far_size,
+                    price=far_yes_price,
+                    reason=f"Calendar spread (LONG far): CDF={pair['near_cdf']:.3f} > {pair['far_cdf']:.3f}, Edge={spread_edge:.3f}",
+                    metadata={
+                        'spread_type': 'calendar_far_leg',
+                        'spread_edge': spread_edge,
+                        'event_id': group_id,
+                        'pair_near_market': near_market_id
+                    }
+                ))
+
+        return signals
+
     def _calculate_position_size(self, price: float, exposure_fraction: float) -> float:
         """
         Calculate position size (number of contracts) based on exposure fraction.
@@ -215,13 +374,13 @@ class FactoredGammaStrategy(Strategy):
         event_id: str
     ) -> List[Signal]:
         """
-        Calculate position sizes based on interval width.
+        Calculate position sizes based on rate edge magnitude.
 
-        KEY IMPROVEMENT: Position sizing inversely proportional to interval width
-            size ∝ 1 / interval_width
+        KEY IMPROVEMENT: Position sizing proportional to rate edge
+            size ∝ rate_edge
 
-        Narrow CI (confident) → larger size
-        Wide CI (uncertain) → smaller size
+        Larger rate mispricing (vs model) → larger size
+        Smaller rate mispricing → smaller size
 
         Args:
             potential_signals: List of signal dicts from first pass
@@ -235,102 +394,119 @@ class FactoredGammaStrategy(Strategy):
         # Separate new positions from exits
         new_position_signals = [
             s for s in potential_signals
-            if s['type'] in [SignalType.BUY, SignalType.SHORT]
+            if s['type'] == SignalType.BUY and 'position' not in s
         ]
 
         # Calculate position sizes for new positions
         if len(new_position_signals) > 0:
-            # Calculate total inverse interval width (for normalization)
-            total_inv_width = sum(
-                1.0 / max(s['prediction'].interval_width, 0.01)
-                for s in new_position_signals
-            )
+            # Calculate total rate edge (for normalization)
+            total_edge = sum(s['rate_edge'] for s in new_position_signals)
 
-            # Allocate exposure proportional to confidence (inverse width)
-            for signal_info in new_position_signals:
-                row = signal_info['row']
-                prediction = signal_info['prediction']
-                signal_type = signal_info['type']
+            if total_edge > 0:
+                # Allocate exposure proportional to rate edge
+                for signal_info in new_position_signals:
+                    row = signal_info['row']
+                    prediction = signal_info['prediction']
+                    rate_edge = signal_info['rate_edge']
+                    outcome = signal_info['outcome']
+                    direction = signal_info['direction']
 
-                # Weight by inverse interval width
-                inv_width = 1.0 / max(prediction.interval_width, 0.01)
-                weight = inv_width / total_inv_width
+                    # Weight by rate edge
+                    weight = rate_edge / total_edge
 
-                # Allocate fraction of max_event_exposure
-                per_market_exposure = self.max_event_exposure * weight
+                    # Allocate fraction of max_event_exposure
+                    per_market_exposure = self.max_event_exposure * weight
 
-                # Calculate size
-                size = self._calculate_position_size(
-                    price=row['price'],
-                    exposure_fraction=per_market_exposure
-                )
+                    # Get the correct price for the outcome we're trading
+                    if outcome == 'Yes':
+                        price = 1.0 - row['price']  # Convert No price to Yes price
+                    else:
+                        price = row['price']  # Use No price directly
 
-                reason_prefix = "Below" if signal_type == SignalType.BUY else "Above"
-                reason = (
-                    f"{reason_prefix} {int(self.ci_level*100)}% CI: "
-                    f"Price={row['price']:.3f}, "
-                    f"Lower={prediction.lower_bound:.3f}, "
-                    f"Upper={prediction.upper_bound:.3f}, "
-                    f"Width={prediction.interval_width:.3f}, "
-                    f"Allocation={per_market_exposure*100:.1f}%"
-                )
+                    # Calculate size
+                    size = self._calculate_position_size(
+                        price=price,
+                        exposure_fraction=per_market_exposure
+                    )
 
-                signals.append(Signal(
-                    market_id=row['market_id'],
-                    token_id=row['token_id'],
-                    outcome='No',
-                    signal_type=signal_type,
-                    size=size,
-                    price=row['price'],
-                    reason=reason,
-                    metadata={
-                        'lower_bound': prediction.lower_bound,
-                        'upper_bound': prediction.upper_bound,
-                        'median': prediction.median,
-                        'interval_width': prediction.interval_width,
-                        'alpha_adjusted': prediction.alpha_adjusted,
-                        'beta_adjusted': prediction.beta_adjusted,
-                        'event_exposure': per_market_exposure,
-                        'event_id': event_id
-                    }
-                ))
+                    # Get token_id for the outcome we're trading
+                    market_tokens = signal_info.get('market_tokens', {})
+                    token_id = market_tokens.get(outcome, row['token_id'])
 
-        # Process exit signals (SELL/COVER)
+                    reason = (
+                        f"Timing arb ({direction}): "
+                        f"YesProb={1.0 - row['price']:.3f}, "
+                        f"Model={prediction.median:.3f}, "
+                        f"MktRate={prediction.market_implied_rate:.2f}, "
+                        f"ModRate={prediction.model_implied_rate:.2f}, "
+                        f"RateEdge={rate_edge:.2f}, "
+                        f"Allocation={per_market_exposure*100:.1f}%"
+                    )
+
+                    signals.append(Signal(
+                        market_id=row['market_id'],
+                        token_id=token_id,
+                        outcome=outcome,
+                        signal_type=SignalType.BUY,
+                        size=size,
+                        price=price,
+                        reason=reason,
+                        metadata={
+                            'model_median': prediction.median,
+                            'market_rate': prediction.market_implied_rate,
+                            'model_rate': prediction.model_implied_rate,
+                            'rate_edge': rate_edge,
+                            'interval_width': prediction.interval_width,
+                            'alpha_adjusted': prediction.alpha_adjusted,
+                            'beta_adjusted': prediction.beta_adjusted,
+                            'event_exposure': per_market_exposure,
+                            'event_id': event_id,
+                            'direction': direction
+                        }
+                    ))
+
+        # Process exit signals (SELL)
         exit_signals = [
             s for s in potential_signals
-            if s['type'] in [SignalType.SELL, SignalType.COVER]
+            if s['type'] == SignalType.SELL
         ]
 
         for signal_info in exit_signals:
             row = signal_info['row']
             prediction = signal_info['prediction']
-            signal_type = signal_info['type']
+            outcome = signal_info['outcome']
             position_size = signal_info['position']
+            direction = signal_info['direction']
+            rate_edge = signal_info['rate_edge']
 
-            reason_prefix = "Exit long" if signal_type == SignalType.SELL else "Exit short"
-            bound_type = "upper" if signal_type == SignalType.SELL else "lower"
-            bound_value = prediction.upper_bound if signal_type == SignalType.SELL else prediction.lower_bound
+            # Get the correct price for the outcome
+            if outcome == 'Yes':
+                price = 1.0 - row['price']
+            else:
+                price = row['price']
 
             reason = (
-                f"{reason_prefix} at {bound_type} bound: "
-                f"Price={row['price']:.3f}, "
-                f"{bound_type.capitalize()}={bound_value:.3f}"
+                f"Exit timing arb ({direction}): "
+                f"YesProb={1.0 - row['price']:.3f}, "
+                f"Model={prediction.median:.3f}, "
+                f"RateEdge={rate_edge:.2f}"
             )
 
             signals.append(Signal(
                 market_id=row['market_id'],
                 token_id=row['token_id'],
-                outcome='No',
-                signal_type=signal_type,
+                outcome=outcome,
+                signal_type=SignalType.SELL,
                 size=position_size,
-                price=row['price'],
+                price=price,
                 reason=reason,
                 metadata={
-                    'lower_bound': prediction.lower_bound,
-                    'upper_bound': prediction.upper_bound,
-                    'median': prediction.median,
-                    'interval_width': prediction.interval_width,
-                    'event_id': event_id
+                    'model_median': prediction.median,
+                    'market_rate': prediction.market_implied_rate,
+                    'model_rate': prediction.model_implied_rate,
+                    'rate_edge': rate_edge,
+                    'event_id': event_id,
+                    'direction': direction
                 }
             ))
 
@@ -378,6 +554,11 @@ class FactoredGammaStrategy(Strategy):
         for group_id in today_data[group_col].unique():
             event_data = today_data[today_data[group_col] == group_id]
 
+            # For each market, keep only the latest price snapshot of the day
+            # This avoids having 24 hourly snapshots creating duplicate term structure points
+            if 'ts' in event_data.columns:
+                event_data = event_data.sort_values('ts').groupby(['market_id', 'outcome'], as_index=False).last()
+
             # Check if this is a time-distributed event
             if not self.is_time_distributed_event(event_data):
                 continue
@@ -391,70 +572,156 @@ class FactoredGammaStrategy(Strategy):
 
             if need_fit:
                 # Fit event using Factored Gamma Model
-                fit_result = self.model.fit_event(event_data, current_date, group_id)
+                # IMPORTANT: Only pass No outcomes to avoid duplicate term structure points
+                event_data_no = event_data[event_data['outcome'] == 'No'].copy()
 
-                if fit_result is not None:
-                    self.fitted_events[group_id] = fit_result
+                self.fit_attempts += 1
+                try:
+                    fit_result = self.model.fit_event(event_data_no, current_date, group_id)
+                    if fit_result is not None:
+                        self.fitted_events[group_id] = fit_result
+                        self.last_fit_date[group_id] = current_date
+
+                        # Check if it's a calendar spread or timing arbitrage fit
+                        if isinstance(fit_result, CalendarSpreadOpportunity):
+                            self.calendar_spread_opportunities += 1
+                        else:
+                            self.fit_successes += 1
+                    else:
+                        # Fitting failed - store None to indicate we tried
+                        # We'll still trade but without gamma edge sizing
+                        self.fitted_events[group_id] = None
+                        self.last_fit_date[group_id] = current_date
+                        reason = "Unknown"
+                        self.fit_failures_by_reason[reason] = self.fit_failures_by_reason.get(reason, 0) + 1
+                except Exception as e:
+                    # Capture the failure reason
+                    reason = str(e).split(':')[0] if ':' in str(e) else str(e)[:50]
+                    self.fit_failures_by_reason[reason] = self.fit_failures_by_reason.get(reason, 0) + 1
+                    self.fitted_events[group_id] = None
                     self.last_fit_date[group_id] = current_date
-                else:
-                    # Fitting failed, skip this event
-                    continue
 
-            # Get fitted model for this event
-            if group_id not in self.fitted_events:
-                continue
+            # Get fitted model for this event (may be None if fitting failed)
+            fit_result = self.fitted_events.get(group_id, None)
 
-            fit_result = self.fitted_events[group_id]
+            # Check if this is a calendar spread opportunity
+            if isinstance(fit_result, CalendarSpreadOpportunity):
+                # Generate calendar spread signals
+                calendar_signals = self._generate_calendar_spread_signals(
+                    fit_result, event_data, current_date, group_id
+                )
+                signals.extend(calendar_signals)
+                continue  # Skip timing arbitrage logic for this group
 
-            # PASS 1: Collect all markets that would trigger signals
+            # PASS 1: Collect all markets that would trigger signals (timing arbitrage)
             potential_signals = []
 
+            # Group by market_id to get both Yes and No tokens
+            market_tokens = {}
+            for _, row in event_data.iterrows():
+                market_id = row['market_id']
+                outcome = row['outcome']
+                if market_id not in market_tokens:
+                    market_tokens[market_id] = {}
+                market_tokens[market_id][outcome] = row['token_id']
+
+            # Iterate over No outcome rows (we'll use them as reference)
             for _, row in event_data[event_data['outcome'] == 'No'].iterrows():
                 market_id = row['market_id']
-                market_price = row['price']
+                no_price = row['price']
+                yes_price = 1.0 - no_price
 
-                # Get prediction from model
-                prediction = self.model.predict(market_id, fit_result, current_date)
+                # Check if we have time_to_expiration column
+                if 'time_to_expiration' not in row.index:
+                    # Calculate TTE if not present
+                    if 'resolution_date' in row.index:
+                        tte_days = (pd.to_datetime(row['resolution_date']) - current_date).days
+                        tte_years = tte_days / 365.25
+                    else:
+                        continue
+                else:
+                    tte_years = row['time_to_expiration']
 
-                if prediction is None:
+                # Try to get prediction from model (may be None if fit failed)
+                prediction = None
+                model_median = yes_price  # Default: use market price as model
+                rate_edge = 0.0  # Default: no edge if model failed
+
+                if fit_result is not None:
+                    prediction = self.model.predict(market_id, fit_result, current_date)
+                    if prediction is not None:
+                        # Model's median prediction (in Yes probability space)
+                        model_median = prediction.median
+                        # Use rate edge from model (difference in implied rates)
+                        rate_edge = prediction.rate_edge
+                    else:
+                        # Model fit succeeded but this market wasn't in the term structure
+                        continue
+                else:
+                    # Model didn't fit for this group - skip
                     continue
 
-                lower_bound = prediction.lower_bound
-                upper_bound = prediction.upper_bound
-                current_position = self.get_position(market_id, 'No')
+                # TIMING ARBITRAGE ENTRY CRITERIA:
+                # 1. Significant rate edge (market mispriced vs model)
+                # 2. Model confidence (narrow CI width)
+                min_rate_edge = 0.1  # Minimum 0.1 rate difference to trade
+                if rate_edge < min_rate_edge:
+                    continue
+
+                current_position_no = self.get_position(market_id, 'No')
+                current_position_yes = self.get_position(market_id, 'Yes')
 
                 # Check which signal type this would trigger
                 signal_info = None
 
-                if market_price < lower_bound and current_position == 0:
-                    # BUY signal: price below lower bound (underpriced)
+                # ENTRY LOGIC: Trade based on model vs market divergence
+                # If market < model median → UNDERPRICED → BUY
+                # If market > model median → OVERPRICED → SELL/SHORT
+
+                if yes_price < model_median and current_position_yes == 0:
+                    # BUY YES: Market underprices event (yes_price < model)
                     signal_info = {
                         'type': SignalType.BUY,
                         'row': row,
-                        'prediction': prediction
+                        'prediction': prediction,
+                        'outcome': 'Yes',
+                        'rate_edge': rate_edge,
+                        'direction': 'arb_long_yes',
+                        'market_tokens': market_tokens.get(market_id, {})
                     }
-                elif market_price > upper_bound and current_position == 0:
-                    # SHORT signal: price above upper bound (overpriced)
+                elif yes_price > model_median and current_position_no == 0:
+                    # BUY NO: Market overprices event (yes_price > model)
                     signal_info = {
-                        'type': SignalType.SHORT,
+                        'type': SignalType.BUY,
                         'row': row,
-                        'prediction': prediction
+                        'prediction': prediction,
+                        'outcome': 'No',
+                        'rate_edge': rate_edge,
+                        'direction': 'arb_long_no',
+                        'market_tokens': market_tokens.get(market_id, {})
                     }
-                elif market_price >= upper_bound and current_position > 0:
-                    # SELL signal: exit long position at upper bound
+                # EXIT LOGIC: Price reverts to model (edge disappears)
+                elif current_position_yes > 0 and yes_price >= model_median:
+                    # Exit YES position: price reached or exceeded model fair value
                     signal_info = {
                         'type': SignalType.SELL,
                         'row': row,
                         'prediction': prediction,
-                        'position': current_position
+                        'outcome': 'Yes',
+                        'position': current_position_yes,
+                        'rate_edge': rate_edge,
+                        'direction': 'arb_exit_yes'
                     }
-                elif market_price <= lower_bound and current_position < 0:
-                    # COVER signal: exit short position at lower bound
+                elif current_position_no > 0 and yes_price <= model_median:
+                    # Exit NO position: price reached or fell below model fair value
                     signal_info = {
-                        'type': SignalType.COVER,
+                        'type': SignalType.SELL,
                         'row': row,
                         'prediction': prediction,
-                        'position': abs(current_position)
+                        'outcome': 'No',
+                        'position': current_position_no,
+                        'rate_edge': rate_edge,
+                        'direction': 'arb_exit_no'
                     }
 
                 if signal_info is not None:
@@ -476,3 +743,35 @@ class FactoredGammaStrategy(Strategy):
         self.fitted_events = {}
         self.last_fit_date = {}
         self.factors_fitted = False
+        self.fit_attempts = 0
+        self.fit_successes = 0
+        self.calendar_spread_opportunities = 0
+        self.fit_failures_by_reason = {}
+
+    def print_fit_statistics(self):
+        """Print gamma fitting statistics."""
+        print(f"\n{'='*70}")
+        print("HYBRID STRATEGY STATISTICS")
+        print(f"{'='*70}")
+        print(f"Total fit attempts:              {self.fit_attempts}")
+        print(f"Timing arbitrage (Gamma fits):   {self.fit_successes} ({self.fit_successes/max(self.fit_attempts,1)*100:.1f}%)")
+        print(f"Calendar spread opportunities:   {self.calendar_spread_opportunities} ({self.calendar_spread_opportunities/max(self.fit_attempts,1)*100:.1f}%)")
+        print(f"Failed fits:                     {self.fit_attempts - self.fit_successes - self.calendar_spread_opportunities}")
+
+        if self.fit_failures_by_reason:
+            print(f"\nFailure reasons:")
+            for reason, count in sorted(self.fit_failures_by_reason.items(), key=lambda x: -x[1]):
+                print(f"  - {reason}: {count}")
+
+        print(f"\n{'='*70}")
+        print("STRATEGY BREAKDOWN")
+        print(f"{'='*70}")
+        print(f"Timing Arbitrage:")
+        print(f"  - Fits Gamma to term structure, trades rate edge")
+        print(f"  - Entry: |market_rate - model_rate| > 0.1")
+        print(f"  - {self.fit_successes} groups qualified")
+        print(f"\nCalendar Spread Arbitrage:")
+        print(f"  - Exploits non-monotonic CDFs")
+        print(f"  - Entry: P(by earlier) > P(by later)")
+        print(f"  - {self.calendar_spread_opportunities} groups qualified")
+        print(f"{'='*70}\n")
