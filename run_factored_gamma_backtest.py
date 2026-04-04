@@ -48,7 +48,7 @@ config = {
     "refit_hours": 24,              # Refit model every 24 hours (faster for testing)
     "n_bootstrap": 100,             # Bootstrap samples for CI calculation (reduced for speed)
     "max_event_exposure": 0.15,     # 15% of portfolio per event
-    "eb_holdout_end_date": "2025-10-05",  # Empirical Bayes cutoff date
+    "eb_holdout_end_date": "2022-12-31",  # Empirical Bayes cutoff date (train on 2022, test on 2023+)
 }
 
 strategy = FactoredGammaStrategy(config=config)
