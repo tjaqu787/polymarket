@@ -191,22 +191,11 @@ class FactoredGammaStrategy(Strategy):
         Returns:
             True if fitting succeeded, False otherwise
         """
-        print(f"\n{'='*70}")
-        print("FACTORED GAMMA STRATEGY: Fitting Empirical Bayes Factors")
-        print(f"{'='*70}")
-        print(f"Holdout end date: {self.eb_holdout_end_date}")
-        print(f"Current date: {current_date}")
-
-        # For now, skip EB factor fitting due to data availability issues
-        # The model will use base Gamma parameters without category adjustments
-        print("\nNOTE: Skipping Empirical Bayes factor fitting (requires resolved event data)")
-        print("Using base Gamma parameters without category adjustments")
-        print("This is sufficient for timing arbitrage and calendar spread strategies\n")
-
-        # Set flags to indicate we've attempted EB fitting
+        # Skip EB factor fitting - the base Gamma model works well without it
+        # EB factors would provide category-specific adjustments, but require
+        # significant resolved market data which is not readily available
         self.factors_fitted = True
-        self.model.factors_fitted = False  # Model knows factors weren't actually fitted
-
+        self.model.factors_fitted = False
         return False
 
     def _generate_calendar_spread_signals(

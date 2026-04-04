@@ -460,13 +460,13 @@ class DataLoader:
         lookback_days: int = 30
     ) -> pd.DataFrame:
         """
-        Load resolved/closed markets for Empirical Bayes factor fitting.
+        Load markets for Empirical Bayes factor fitting.
 
-        For each closed market in a semantic group, we extract a term structure
-        snapshot from `lookback_days` before the resolution date.
+        Treats all markets with end_date <= holdout_end_date as "resolved" for training,
+        and extracts term structure snapshots from `lookback_days` before their resolution.
 
         Args:
-            holdout_end_date: Only use markets that closed before this date
+            holdout_end_date: Only use markets with end_date <= this date (treated as resolved)
             lookback_days: Days before resolution to take term structure snapshot (default 30)
 
         Returns:
@@ -481,7 +481,7 @@ class DataLoader:
         """
         conn = sqlite3.connect(self.db_path)
 
-        # Get closed markets with semantic grouping
+        # Get markets with end_date in training period (treat as resolved even if not technically closed)
         query = """
         SELECT
             m.market_id,
@@ -490,14 +490,13 @@ class DataLoader:
             smg.semantic_group_id,
             m.question,
             m.category,
-            m.end_date as resolution_date,
-            m.closed
+            m.end_date as resolution_date
         FROM markets m
         LEFT JOIN semantic_market_groups smg ON m.market_id = smg.market_id
-        WHERE m.closed = 1
-          AND DATE(m.end_date) <= ?
+        WHERE DATE(m.end_date) <= ?
           AND m.end_date IS NOT NULL
           AND m.category IS NOT NULL
+          AND m.volume_num >= 100
         """
 
         params = [holdout_end_date]
@@ -506,10 +505,10 @@ class DataLoader:
         conn.close()
 
         if df_markets.empty:
-            print(f"No closed markets found before {holdout_end_date}")
+            print(f"No markets found with end_date <= {holdout_end_date}")
             return pd.DataFrame()
 
-        print(f"Found {len(df_markets)} closed markets before {holdout_end_date}")
+        print(f"Found {len(df_markets)} markets with end_date <= {holdout_end_date}")
 
         # For each semantic group with multiple markets, extract term structure
         # snapshot from `lookback_days` before the earliest resolution
