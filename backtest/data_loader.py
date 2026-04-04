@@ -453,3 +453,217 @@ class DataLoader:
         conn.close()
 
         return df['date'].tolist()
+
+    def load_resolved_events_for_eb(
+        self,
+        holdout_end_date: str,
+        lookback_days: int = 30
+    ) -> pd.DataFrame:
+        """
+        Load resolved/closed markets for Empirical Bayes factor fitting.
+
+        For each closed market in a semantic group, we extract a term structure
+        snapshot from `lookback_days` before the resolution date.
+
+        Args:
+            holdout_end_date: Only use markets that closed before this date
+            lookback_days: Days before resolution to take term structure snapshot (default 30)
+
+        Returns:
+            DataFrame with columns:
+                - event_id or semantic_group_id
+                - category
+                - resolution_date
+                - date (observation date for term structure)
+                - times (array of tenors)
+                - cdf_values (array of Yes prices)
+                - ts_slope, ts_curvature, implied_rate
+        """
+        conn = sqlite3.connect(self.db_path)
+
+        # Get closed markets with semantic grouping
+        query = """
+        SELECT
+            m.market_id,
+            m.event_id,
+            COALESCE(smg.semantic_group_id, m.event_id) as group_col,
+            smg.semantic_group_id,
+            m.question,
+            m.category,
+            m.end_date as resolution_date,
+            m.closed
+        FROM markets m
+        LEFT JOIN semantic_market_groups smg ON m.market_id = smg.market_id
+        WHERE m.closed = 1
+          AND DATE(m.end_date) <= ?
+          AND m.end_date IS NOT NULL
+          AND m.category IS NOT NULL
+        """
+
+        params = [holdout_end_date]
+
+        df_markets = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+
+        if df_markets.empty:
+            print(f"No closed markets found before {holdout_end_date}")
+            return pd.DataFrame()
+
+        print(f"Found {len(df_markets)} closed markets before {holdout_end_date}")
+
+        # For each semantic group with multiple markets, extract term structure
+        # snapshot from `lookback_days` before the earliest resolution
+        resolved_events = []
+
+        for group_id in df_markets['group_col'].unique():
+            group_markets = df_markets[df_markets['group_col'] == group_id]
+
+            # Need at least 3 markets in a group to fit a term structure
+            if len(group_markets) < 3:
+                continue
+
+            # Get earliest resolution date in group
+            resolution_dates = pd.to_datetime(group_markets['resolution_date'])
+            earliest_resolution = resolution_dates.min()
+
+            # Calculate snapshot date (lookback_days before earliest resolution)
+            snapshot_date = earliest_resolution - timedelta(days=lookback_days)
+            snapshot_date_str = snapshot_date.strftime('%Y-%m-%d')
+
+            # Load price data for this group at the snapshot date
+            market_ids = group_markets['market_id'].tolist()
+
+            try:
+                # Query price data near the snapshot date (±3 days tolerance)
+                conn = sqlite3.connect(self.db_path)
+
+                placeholders = ','.join('?' * len(market_ids))
+                price_query = f"""
+                SELECT
+                    mt.market_id,
+                    mt.outcome,
+                    ph.date,
+                    ph.price,
+                    m.end_date as resolution_date
+                FROM market_tokens mt
+                JOIN price_history ph ON mt.token_id = ph.token_id
+                JOIN markets m ON mt.market_id = m.market_id
+                WHERE mt.market_id IN ({placeholders})
+                  AND mt.outcome = 'No'
+                  AND ph.date >= DATE(?, '-3 days')
+                  AND ph.date <= DATE(?, '+3 days')
+                ORDER BY mt.market_id, ph.date
+                """
+
+                params_price = market_ids + [snapshot_date_str, snapshot_date_str]
+                df_prices = pd.read_sql_query(price_query, conn, params=params_price)
+                conn.close()
+
+                if df_prices.empty:
+                    continue
+
+                # Convert dates
+                df_prices['date'] = pd.to_datetime(df_prices['date'])
+                df_prices['resolution_date'] = pd.to_datetime(df_prices['resolution_date'])
+
+                # Take the closest date to snapshot date for each market
+                df_prices['date_diff'] = (df_prices['date'] - snapshot_date).abs()
+                df_snapshot = df_prices.sort_values('date_diff').groupby('market_id').first().reset_index()
+
+                if len(df_snapshot) < 3:
+                    continue
+
+                # Use the actual snapshot date from the data
+                actual_snapshot_date = df_snapshot['date'].iloc[0]
+
+                # Calculate times and CDF values
+                times = []
+                cdf_values = []
+                implied_rates = []
+
+                for _, row in df_snapshot.iterrows():
+                    time_to_resolution = (row['resolution_date'] - actual_snapshot_date).days / 365.25
+                    if time_to_resolution <= 0:
+                        continue
+
+                    # Convert No price to Yes price
+                    yes_price = 1.0 - row['price']
+                    yes_price_clipped = np.clip(yes_price, 1e-6, 1-1e-6)
+
+                    # Calculate implied rate
+                    implied_rate = -np.log(yes_price_clipped) / time_to_resolution
+
+                    times.append(time_to_resolution)
+                    cdf_values.append(yes_price)
+                    implied_rates.append(implied_rate)
+
+                if len(times) < 3:
+                    continue
+
+                # Calculate term structure features
+                times_arr = np.array(times)
+                cdf_arr = np.array(cdf_values)
+                rates_arr = np.array(implied_rates)
+
+                # Sort by time
+                sort_idx = np.argsort(times_arr)
+                times_arr = times_arr[sort_idx]
+                cdf_arr = cdf_arr[sort_idx]
+                rates_arr = rates_arr[sort_idx]
+
+                # Calculate slope (change in rate over time)
+                if len(times_arr) >= 2:
+                    ts_slope = (rates_arr[-1] - rates_arr[0]) / (times_arr[-1] - times_arr[0])
+                else:
+                    ts_slope = 0.0
+
+                # Calculate curvature (second derivative approximation)
+                if len(times_arr) >= 3:
+                    # Use central difference for middle points
+                    mid_idx = len(rates_arr) // 2
+                    if mid_idx > 0 and mid_idx < len(rates_arr) - 1:
+                        h1 = times_arr[mid_idx] - times_arr[mid_idx-1]
+                        h2 = times_arr[mid_idx+1] - times_arr[mid_idx]
+                        d1 = (rates_arr[mid_idx] - rates_arr[mid_idx-1]) / h1
+                        d2 = (rates_arr[mid_idx+1] - rates_arr[mid_idx]) / h2
+                        ts_curvature = (d2 - d1) / ((h1 + h2) / 2)
+                    else:
+                        ts_curvature = 0.0
+                else:
+                    ts_curvature = 0.0
+
+                # Average implied rate
+                avg_implied_rate = np.mean(rates_arr)
+
+                # Get category from first market in group
+                category = group_markets.iloc[0]['category']
+                if pd.isna(category):
+                    category = 'unknown'
+
+                resolved_events.append({
+                    'semantic_group_id': group_id,
+                    'event_id': group_markets.iloc[0]['event_id'],
+                    'category': category,
+                    'resolution_date': earliest_resolution,
+                    'date': actual_snapshot_date,
+                    'times': times_arr,
+                    'cdf_values': cdf_arr,
+                    'ts_slope': ts_slope,
+                    'ts_curvature': ts_curvature,
+                    'implied_rate': avg_implied_rate,
+                    'n_markets': len(times_arr)
+                })
+
+            except Exception as e:
+                # Skip groups that fail
+                continue
+
+        if len(resolved_events) == 0:
+            print("No resolved events with valid term structures found")
+            return pd.DataFrame()
+
+        df_resolved = pd.DataFrame(resolved_events)
+        print(f"Successfully extracted {len(df_resolved)} resolved event term structures")
+        print(f"Categories: {df_resolved['category'].value_counts().to_dict()}")
+
+        return df_resolved

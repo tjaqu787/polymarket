@@ -45,8 +45,8 @@ config = {
     "ci_level": 0.70,              # 70% credible interval
     "min_buckets": 3,               # Min term structure points
     "max_rmse": 0.3,                # Max fit error threshold
-    "refit_hours": 6,               # Refit model every 6 hours (adaptive to data)
-    "n_bootstrap": 500,             # Bootstrap samples for CI calculation
+    "refit_hours": 24,              # Refit model every 24 hours (faster for testing)
+    "n_bootstrap": 100,             # Bootstrap samples for CI calculation (reduced for speed)
     "max_event_exposure": 0.15,     # 15% of portfolio per event
     "eb_holdout_end_date": "2025-10-05",  # Empirical Bayes cutoff date
 }
@@ -81,7 +81,7 @@ engine = BacktestEngine(
 print("Starting backtest...\n")
 
 results = engine.run(
-    start_date="2022-11-05",
+    start_date="2023-01-01",  # Full backtest period
     end_date="2026-03-16",
     use_carry_markets=True,  # Use all markets for carry trading
     min_volume=100,

@@ -51,6 +51,14 @@ if st.sidebar.button("🔄 Clear Cache"):
     st.cache_data.clear()
     st.rerun()
 
+# Add confusion matrix button
+if st.sidebar.button("📊 Show Confusion Matrix"):
+    st.session_state.show_confusion_matrix = not st.session_state.get('show_confusion_matrix', False)
+
+# Initialize session state
+if 'show_confusion_matrix' not in st.session_state:
+    st.session_state.show_confusion_matrix = False
+
 groups_df = load_groups()
 
 if len(groups_df) == 0:
@@ -106,6 +114,107 @@ else:
 st.sidebar.write(f"**Event Slug:** {selected_event_slug}")
 st.sidebar.write(f"**Markets:** {groups_df.loc[selected_idx, 'num_markets']}")
 st.sidebar.write(f"**Resolution dates:** {groups_df.loc[selected_idx, 'num_dates']}")
+
+# Display confusion matrix if requested
+if st.session_state.get('show_confusion_matrix', False):
+    st.markdown("---")
+    st.header("📊 Backtest Confusion Matrix")
+
+    import os
+    backtest_file = "backtest_results/factored_gamma_trades.csv"
+
+    if os.path.exists(backtest_file):
+        try:
+            trades_df = pd.read_csv(backtest_file)
+
+            # Calculate trade outcomes
+            if 'pnl' in trades_df.columns:
+                trades_df['profitable'] = trades_df['pnl'] > 0
+                trades_df['predicted_direction'] = trades_df.apply(
+                    lambda x: 'Long' if x['outcome'] == 'Yes' else 'Short',
+                    axis=1
+                )
+
+                # Create confusion matrix-style metrics
+                total_trades = len(trades_df)
+                profitable_longs = len(trades_df[(trades_df['outcome'] == 'Yes') & (trades_df['profitable'] == True)])
+                unprofitable_longs = len(trades_df[(trades_df['outcome'] == 'Yes') & (trades_df['profitable'] == False)])
+                profitable_shorts = len(trades_df[(trades_df['outcome'] == 'No') & (trades_df['profitable'] == True)])
+                unprofitable_shorts = len(trades_df[(trades_df['outcome'] == 'No') & (trades_df['profitable'] == False)])
+
+                # Display as a formatted table
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    st.metric("Total Trades", total_trades)
+
+                with col2:
+                    win_rate = (profitable_longs + profitable_shorts) / total_trades * 100 if total_trades > 0 else 0
+                    st.metric("Win Rate", f"{win_rate:.1f}%")
+
+                with col3:
+                    avg_pnl = trades_df['pnl'].mean() if 'pnl' in trades_df.columns else 0
+                    st.metric("Avg P&L per Trade", f"${avg_pnl:.2f}")
+
+                # Create confusion matrix visualization
+                matrix_data = pd.DataFrame({
+                    'Position Type': ['Long (Yes)', 'Long (Yes)', 'Short (No)', 'Short (No)'],
+                    'Outcome': ['Profitable', 'Unprofitable', 'Profitable', 'Unprofitable'],
+                    'Count': [profitable_longs, unprofitable_longs, profitable_shorts, unprofitable_shorts]
+                })
+
+                fig = px.bar(
+                    matrix_data,
+                    x='Position Type',
+                    y='Count',
+                    color='Outcome',
+                    barmode='group',
+                    title='Trade Outcomes by Position Type',
+                    color_discrete_map={'Profitable': 'green', 'Unprofitable': 'red'}
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Show trade statistics by direction
+                st.subheader("Trade Statistics by Direction")
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.markdown("**Long Positions (Yes)**")
+                    long_trades = trades_df[trades_df['outcome'] == 'Yes']
+                    if len(long_trades) > 0:
+                        st.write(f"- Total: {len(long_trades)}")
+                        st.write(f"- Profitable: {profitable_longs} ({profitable_longs/len(long_trades)*100:.1f}%)")
+                        st.write(f"- Unprofitable: {unprofitable_longs} ({unprofitable_longs/len(long_trades)*100:.1f}%)")
+                        st.write(f"- Avg P&L: ${long_trades['pnl'].mean():.2f}")
+                    else:
+                        st.write("No long positions taken")
+
+                with col2:
+                    st.markdown("**Short Positions (No)**")
+                    short_trades = trades_df[trades_df['outcome'] == 'No']
+                    if len(short_trades) > 0:
+                        st.write(f"- Total: {len(short_trades)}")
+                        st.write(f"- Profitable: {profitable_shorts} ({profitable_shorts/len(short_trades)*100:.1f}%)")
+                        st.write(f"- Unprofitable: {unprofitable_shorts} ({unprofitable_shorts/len(short_trades)*100:.1f}%)")
+                        st.write(f"- Avg P&L: ${short_trades['pnl'].mean():.2f}")
+                    else:
+                        st.write("No short positions taken")
+
+            else:
+                st.warning("No P&L data available in trade results")
+                st.write("Available columns:", list(trades_df.columns))
+
+        except Exception as e:
+            st.error(f"Error loading confusion matrix: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+    else:
+        st.warning(f"No backtest results found at `{backtest_file}`. Run a backtest first to see the confusion matrix.")
+        st.info("To generate backtest results, run: `python run_factored_gamma_backtest.py`")
+
+    st.markdown("---")
 
 # Load price history for selected market
 @st.cache_data

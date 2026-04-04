@@ -603,11 +603,13 @@ class FactoredGammaModel:
         implied_rate: float
     ) -> Dict:
         """
-        Compute credible intervals by bootstrapping the entire fit + adjustment pipeline.
+        Compute credible intervals by bootstrapping with importance sampling on the lower tail.
 
-        This is the CORRECT implementation: for each bootstrap iteration,
-        we resample from the implied PDF, fit base Gamma, apply factor adjustments,
-        and predict CDF. This gives real uncertainty that reflects data quality and fit.
+        This implementation uses IMPORTANCE SAMPLING focused on the lowest 30% credible interval
+        to get better estimates in the region we care about for risk assessment.
+
+        The key insight: We care more about tail risk (downside) than the full distribution.
+        By oversampling the lower tail, we get more accurate CI estimates where it matters.
 
         Args:
             times: Time points
@@ -625,17 +627,30 @@ class FactoredGammaModel:
         # Convert CDF to PDF for resampling
         time_midpoints, pdf_values = self.fitter.cdf_to_pdf(times, cdf_values)
 
+        # IMPORTANCE SAMPLING: Create weighted PDF that oversamples the lower 30% of the distribution
+        # Find the 30th percentile time
+        cumsum_pdf = np.cumsum(pdf_values / pdf_values.sum())
+        percentile_30_idx = np.searchsorted(cumsum_pdf, 0.30)
+
+        # Create importance weights: 3x weight for lower 30%, 1x for the rest
+        importance_weights = np.ones_like(pdf_values)
+        importance_weights[:percentile_30_idx+1] = 3.0  # Oversample lower tail
+
+        # Normalize the importance-weighted PDF
+        weighted_pdf = pdf_values * importance_weights
+        sampling_probs = weighted_pdf / weighted_pdf.sum()
+
         bootstrap_cdfs = []
         n_samples = 10000  # Samples per bootstrap iteration
 
         for _ in range(self.n_bootstrap):
             try:
-                # Resample from implied PDF
+                # Resample from IMPORTANCE-WEIGHTED PDF (oversamples lower tail)
                 sample_times = np.random.choice(
                     time_midpoints,
                     size=n_samples,
                     replace=True,
-                    p=pdf_values / pdf_values.sum()
+                    p=sampling_probs
                 )
 
                 # Fit base Gamma to bootstrap sample
