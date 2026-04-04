@@ -1,0 +1,7 @@
+delta_1 (1d vs 30d)
+  ADVI (full data): mean=0.848 (94% HDI [0.689, 1.024]), multiplier exp(mean)=2.335 (94% HDI [1.992, 2.784])
+  NUTS quick (subsample): mean=0.867 (94% HDI [0.675, 0.989]), multiplier exp(mean)=2.380 (94% HDI [1.964, 2.689])
+
+delta_7 (7d vs 30d)
+  ADVI (full data): mean=0.072 (94% HDI [-0.119, 0.251]), multiplier exp(mean)=1.075 (94% HDI [0.888, 1.285])
+  NUTS quick (subsample): mean=0.109 (94% HDI [-0.030, 0.243]), multiplier exp(mean)=1.115 (94% HDI [0.970, 1.275])
