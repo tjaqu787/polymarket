@@ -246,16 +246,17 @@ class FactoredGammaStrategy(Strategy):
         if total_edge <= 0:
             return signals
 
-        # Group by market_id to get both Yes and No tokens
+        # Group by market_id to get both Yes and No tokens and prices
         market_tokens = {}
-        market_data = {}
+        market_data_by_outcome = {}  # Changed: store by (market_id, outcome)
         for _, row in event_data.iterrows():
             market_id = row['market_id']
             outcome = row['outcome']
             if market_id not in market_tokens:
                 market_tokens[market_id] = {}
-                market_data[market_id] = row
             market_tokens[market_id][outcome] = row['token_id']
+            # Store row keyed by (market_id, outcome) to get correct prices
+            market_data_by_outcome[(market_id, outcome)] = row
 
         # Generate signals for each spread pair
         for pair in calendar_spread.spread_pairs:
@@ -271,12 +272,16 @@ class FactoredGammaStrategy(Strategy):
             if near_position < 0 or far_position > 0:
                 continue
 
-            # Check if these markets exist in current data
-            if near_market_id not in market_data or far_market_id not in market_data:
+            # Check if these markets exist in current data (need 'No' outcome for both)
+            near_key = (near_market_id, 'No')
+            far_key = (far_market_id, 'No')
+
+            if near_key not in market_data_by_outcome or far_key not in market_data_by_outcome:
+                # Skip if we don't have No outcome prices for both markets
                 continue
 
-            near_row = market_data[near_market_id]
-            far_row = market_data[far_market_id]
+            near_row = market_data_by_outcome[near_key]
+            far_row = market_data_by_outcome[far_key]
 
             # Calculate position size proportional to spread edge
             weight = spread_edge / total_edge
