@@ -54,7 +54,7 @@ engine = BacktestEngine(
 print("\nStarting backtest...\n")
 
 results = engine.run(
-    start_date="2025-10-01",  # Expanded test period (4 months)
+    start_date="2023-01-01",  # Expanded test period (4 months)
     end_date="2026-01-31",
     use_carry_markets=True,  # Use all markets
     min_volume=100,
