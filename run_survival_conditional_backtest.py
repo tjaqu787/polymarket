@@ -41,8 +41,8 @@ config = {
     "min_tte_days": 7,              # Min days to expiry
     "max_tte_days": 365,            # Max days to expiry
     "refit_days": 7,                # Refit model every 7 days
-    "min_survival_edge": 0.04,      # Min 4% edge to trade
-    "min_volume": 500,              # Min market volume
+    "min_survival_edge": 0.02,      # Min 2% edge to trade (lowered from 4%)
+    "min_volume": 100,              # Min market volume (lowered from 500)
     "kelly_fraction": 0.25,         # 25% fractional Kelly
     "max_position": 0.10,           # Max 10% per position
     "max_group_exposure": 0.15,     # Max 15% per event group
@@ -79,11 +79,11 @@ engine = BacktestEngine(
 print("Starting backtest...\n")
 
 results = engine.run(
-    start_date="2024-06-01",  # 6-month test period
+    start_date="2024-11-01",  # 2-month test period
     end_date="2024-12-31",
-    use_timing_markets=True,  # Use timing markets (semantic groups)
-    use_carry_markets=False,
-    min_volume=500,
+    use_timing_markets=False,
+    use_carry_markets=True,  # Use carry markets (all markets with semantic groups)
+    min_volume=100,
 )
 
 if not results:
