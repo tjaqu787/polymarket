@@ -12,7 +12,15 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from backtest import BacktestEngine, DataLoader
-from backtest.strategies.spread_dynamics_strategy import SpreadDynamicsStrategy
+# Import directly to avoid pymc dependency from other strategies
+import importlib.util
+spec = importlib.util.spec_from_file_location(
+    "spread_dynamics_strategy",
+    "backtest/strategies/spread_dynamics_strategy.py"
+)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+SpreadDynamicsStrategy = module.SpreadDynamicsStrategy
 
 DB_PATH = "data/polymarket.db"
 

@@ -131,7 +131,7 @@ class SpreadDynamicsStrategy(Strategy):
         event_data = data[
             (data['group_col'] == event_id) &
             (data['date'] == current_date) &
-            (data['outcome'] == 'Yes')
+            (data['outcome'] == 'No')
         ].copy()
 
         if event_data.empty:
@@ -246,13 +246,13 @@ class SpreadDynamicsStrategy(Strategy):
         # Get historical data for both markets
         near_data = data[
             (data['market_id'] == near_market_id) &
-            (data['outcome'] == 'Yes') &
+            (data['outcome'] == 'No') &
             (data['date'] <= current_date)
         ].sort_values('date')
 
         far_data = data[
             (data['market_id'] == far_market_id) &
-            (data['outcome'] == 'Yes') &
+            (data['outcome'] == 'No') &
             (data['date'] <= current_date)
         ].sort_values('date')
 
@@ -420,7 +420,7 @@ class SpreadDynamicsStrategy(Strategy):
                         signals.append(Signal(
                             market_id=far['market_id'],
                             token_id=far['token_id'],
-                            outcome='Yes',
+                            outcome='No',
                             signal_type=SignalType.SELL,
                             size=position_size,
                             price=far['price'],
@@ -440,7 +440,7 @@ class SpreadDynamicsStrategy(Strategy):
                         signals.append(Signal(
                             market_id=near['market_id'],
                             token_id=near['token_id'],
-                            outcome='Yes',
+                            outcome='No',
                             signal_type=SignalType.BUY,
                             size=position_size,
                             price=near['price'],
@@ -480,7 +480,7 @@ class SpreadDynamicsStrategy(Strategy):
                         signals.append(Signal(
                             market_id=far['market_id'],
                             token_id=far['token_id'],
-                            outcome='Yes',
+                            outcome='No',
                             signal_type=SignalType.BUY,
                             size=position_size,
                             price=far['price'],
@@ -500,7 +500,7 @@ class SpreadDynamicsStrategy(Strategy):
                         signals.append(Signal(
                             market_id=near['market_id'],
                             token_id=near['token_id'],
-                            outcome='Yes',
+                            outcome='No',
                             signal_type=SignalType.SELL,
                             size=position_size,
                             price=near['price'],
@@ -582,7 +582,7 @@ class SpreadDynamicsStrategy(Strategy):
             signals.append(Signal(
                 market_id=near['market_id'],
                 token_id=near['token_id'],
-                outcome='Yes',
+                outcome='No',
                 signal_type=SignalType.SELL,
                 size=position['near_leg_size'],
                 price=near['price'],
@@ -598,7 +598,7 @@ class SpreadDynamicsStrategy(Strategy):
             signals.append(Signal(
                 market_id=near['market_id'],
                 token_id=near['token_id'],
-                outcome='Yes',
+                outcome='No',
                 signal_type=SignalType.BUY,
                 size=position['near_leg_size'],
                 price=near['price'],
@@ -616,7 +616,7 @@ class SpreadDynamicsStrategy(Strategy):
             signals.append(Signal(
                 market_id=far['market_id'],
                 token_id=far['token_id'],
-                outcome='Yes',
+                outcome='No',
                 signal_type=SignalType.BUY,
                 size=position['far_leg_size'],
                 price=far['price'],
@@ -632,7 +632,7 @@ class SpreadDynamicsStrategy(Strategy):
             signals.append(Signal(
                 market_id=far['market_id'],
                 token_id=far['token_id'],
-                outcome='Yes',
+                outcome='No',
                 signal_type=SignalType.SELL,
                 size=position['far_leg_size'],
                 price=far['price'],
