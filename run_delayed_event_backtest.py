@@ -71,7 +71,15 @@ print(f"{'='*70}\n")
 # Print results
 engine.print_results()
 
-print("\n✓ Trades saved to: backtest_results/delayed_event_trades.csv")
+# Save trades
+import os
+os.makedirs("backtest_results", exist_ok=True)
+if not results["trades"].empty:
+    out = "backtest_results/delayed_event_trades.csv"
+    results["trades"].to_csv(out, index=False)
+    print(f"\n✓ Trades saved to: {out}")
+else:
+    print("\n⚠ No trades to save.")
 
 print(f"\n{'='*70}")
 print("NOTES")
