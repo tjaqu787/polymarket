@@ -69,12 +69,12 @@ def get_market_ids(db_path: str) -> list[dict]:
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("""
-        SELECT DISTINCT market_id, event_id
-        FROM bets_for_timing_view
-        WHERE market_id IS NOT NULL
-          AND active = 1
-          AND volume > 100
-        ORDER BY created_at DESC
+        SELECT DISTINCT m.market_id, m.event_id
+        FROM markets m
+        WHERE m.market_id IS NOT NULL
+          AND m.active = 1
+          AND m.volume_num > 100
+        ORDER BY m.created_at DESC
     """)
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
