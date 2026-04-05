@@ -169,7 +169,13 @@ class BacktestEngine:
 
     def _check_resolutions(self, current_date: pd.Timestamp, data: pd.DataFrame):
         """Check for markets that have resolved and close positions."""
+        closed_positions = set()  # Track positions we've already closed
+
         for (market_id, outcome), position in list(self.portfolio.positions.items()):
+            # Skip if already closed (e.g., as part of a calendar spread pair)
+            if (market_id, outcome) in closed_positions:
+                continue
+
             # Get market resolution date
             market_data = data[
                 (data['market_id'] == market_id) &
@@ -188,14 +194,64 @@ class BacktestEngine:
                 # For now, we'll use the last available price
                 last_price = market_data.iloc[-1]['price']
 
-                # Close position
-                self.portfolio.close_position(
-                    market_id=market_id,
-                    outcome=outcome,
-                    price=last_price,
-                    date=current_date,
-                    reason="Market resolved"
-                )
+                # Check if this is part of a paired spread (calendar or delayed event)
+                spread_type = position.metadata.get('spread_type')
+                is_short_leg = spread_type in ['calendar_near_leg', 'delayed_short_leg']
+
+                if is_short_leg:
+                    # This is the short/near leg - close BOTH legs
+                    paired_market_id = position.metadata.get('pair_far_market') or position.metadata.get('pair_long_market')
+
+                    # Determine paired leg type
+                    if spread_type == 'calendar_near_leg':
+                        paired_leg_type = 'calendar_far_leg'
+                        reason = "Calendar spread near leg expired"
+                    else:  # delayed_short_leg
+                        paired_leg_type = 'delayed_long_leg'
+                        reason = "Delayed event short leg expired"
+
+                    # Close short/near leg
+                    self.portfolio.close_position(
+                        market_id=market_id,
+                        outcome=outcome,
+                        price=last_price,
+                        date=current_date,
+                        reason=reason
+                    )
+                    closed_positions.add((market_id, outcome))
+
+                    # Find and close paired leg
+                    if paired_market_id:
+                        for (paired_mid, paired_out), paired_pos in list(self.portfolio.positions.items()):
+                            if paired_mid == paired_market_id and paired_pos.metadata.get('spread_type') == paired_leg_type:
+                                # Get paired leg price
+                                paired_data = data[
+                                    (data['market_id'] == paired_mid) &
+                                    (data['outcome'] == paired_out) &
+                                    (data['date'] == current_date)
+                                ]
+
+                                if not paired_data.empty:
+                                    paired_price = paired_data.iloc[-1]['price']
+                                    self.portfolio.close_position(
+                                        market_id=paired_mid,
+                                        outcome=paired_out,
+                                        price=paired_price,
+                                        date=current_date,
+                                        reason=reason
+                                    )
+                                    closed_positions.add((paired_mid, paired_out))
+                                break
+                else:
+                    # Regular position or calendar far leg without near leg - close normally
+                    self.portfolio.close_position(
+                        market_id=market_id,
+                        outcome=outcome,
+                        price=last_price,
+                        date=current_date,
+                        reason="Market resolved"
+                    )
+                    closed_positions.add((market_id, outcome))
 
     def _update_prices(self, current_date: pd.Timestamp, data: pd.DataFrame):
         """Update current prices for all positions."""
@@ -233,7 +289,8 @@ class BacktestEngine:
                     outcome=signal.outcome,
                     price=signal.price,
                     size=signal.size,
-                    date=current_date
+                    date=current_date,
+                    metadata=signal.metadata
                 )
 
                 if success and self.verbose:

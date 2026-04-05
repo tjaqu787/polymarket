@@ -20,6 +20,7 @@ class Position:
     entry_date: pd.Timestamp
     current_price: float = 0.0
     unrealized_pnl: float = 0.0
+    metadata: Dict = field(default_factory=dict)
 
     def update_price(self, price: float):
         """Update current price and unrealized P&L."""
@@ -146,7 +147,8 @@ class Portfolio:
         outcome: str,
         price: float,
         size: float,
-        date: pd.Timestamp
+        date: pd.Timestamp,
+        metadata: Optional[Dict] = None
     ) -> bool:
         """
         Open a new position.
@@ -158,6 +160,7 @@ class Portfolio:
             price: Entry price
             size: Position size
             date: Entry date
+            metadata: Optional metadata (e.g., for tracking calendar spread pairs)
 
         Returns:
             True if position opened successfully
@@ -188,7 +191,8 @@ class Portfolio:
             size=size,
             entry_price=price,
             entry_date=date,
-            current_price=price
+            current_price=price,
+            metadata=metadata or {}
         )
 
         return True
