@@ -51,12 +51,25 @@ class SpreadDynamicsStrategy(Strategy):
         self.max_event_exposure = self.config.get('max_event_exposure', 0.20)
         self.min_pair_correlation = self.config.get('min_pair_correlation', 0.60)
 
+        # Bayesian Kelly parameters
+        self.prior_edge_mean = self.config.get('prior_edge_mean', 0.0)  # Prior belief about edge
+        self.prior_edge_std = self.config.get('prior_edge_std', 0.05)   # Prior uncertainty
+        self.obs_std = self.config.get('obs_std', 0.02)                 # Observation noise
+        self.use_bayesian_kelly = self.config.get('use_bayesian_kelly', True)
+
         # State tracking
         self.spread_positions = {}  # (event_id, near_market_id, far_market_id) -> trade info
         self.spread_history = {}  # pair_id -> DataFrame with spread time series
         self.volume_history = {}  # event_id -> DataFrame with volume time series
         self.last_refit_date = None
         self.spread_velocity_history = {}  # pair_id -> list of velocities for variance estimation
+
+        # Bayesian posterior tracking: pair_id -> {'mu': mean, 'sigma': std, 'n_obs': count}
+        self.edge_posterior = defaultdict(lambda: {
+            'mu': self.prior_edge_mean,
+            'sigma': self.prior_edge_std,
+            'n_obs': 0
+        })
 
     @property
     def name(self) -> str:
@@ -539,30 +552,94 @@ class SpreadDynamicsStrategy(Strategy):
 
         return signals
 
-    def _calculate_position_size(self, pair_id: str, edge: float) -> float:
+    def update_edge_posterior(self, pair_id: str, observed_return: float):
         """
-        Calculate position size using Kelly criterion.
+        Bayesian update of edge posterior after observing a trade outcome.
+
+        Uses Normal-Normal conjugate prior for analytical posterior.
 
         Args:
             pair_id: Pair identifier
-            edge: Expected spread change magnitude
+            observed_return: Realized return from the trade (spread change)
+        """
+        posterior = self.edge_posterior[pair_id]
+
+        # Prior: edge ~ N(μ₀, σ₀²)
+        mu_prior = posterior['mu']
+        sigma_prior = posterior['sigma']
+
+        # Likelihood: return ~ N(edge, σ_obs²)
+        sigma_obs = self.obs_std
+
+        # Posterior (Normal-Normal conjugate):
+        # σ_n² = 1 / (1/σ₀² + 1/σ_obs²)
+        precision_prior = 1 / (sigma_prior ** 2)
+        precision_obs = 1 / (sigma_obs ** 2)
+        precision_posterior = precision_prior + precision_obs
+        sigma_posterior = np.sqrt(1 / precision_posterior)
+
+        # μ_n = σ_n² * (μ₀/σ₀² + r/σ_obs²)
+        mu_posterior = (sigma_posterior ** 2) * (
+            mu_prior * precision_prior + observed_return * precision_obs
+        )
+
+        # Update stored posterior
+        self.edge_posterior[pair_id] = {
+            'mu': mu_posterior,
+            'sigma': sigma_posterior,
+            'n_obs': posterior['n_obs'] + 1
+        }
+
+    def _calculate_position_size(self, pair_id: str, edge: float) -> float:
+        """
+        Calculate position size using Bayesian Kelly criterion.
+
+        Accounts for uncertainty in edge estimate by penalizing when posterior
+        variance is high (we're uncertain about true edge).
+
+        Args:
+            pair_id: Pair identifier
+            edge: Observed spread change magnitude (signal)
 
         Returns:
             Position size as fraction of capital
         """
-        # Get historical spread velocity variance if available
-        if pair_id in self.spread_velocity_history and len(self.spread_velocity_history[pair_id]) > 5:
-            velocities = self.spread_velocity_history[pair_id]
-            edge_variance = np.var(velocities)
+        if self.use_bayesian_kelly:
+            # Use Bayesian posterior instead of point estimate
+            posterior = self.edge_posterior[pair_id]
+            mu_posterior = posterior['mu']
+            sigma_posterior = posterior['sigma']
+
+            # Bayesian Kelly with uncertainty penalty:
+            # f = μ / (σ_obs² + σ_posterior²)
+            # This reduces position size when uncertain about edge
+            sigma_obs = self.obs_std
+            total_variance = sigma_obs ** 2 + sigma_posterior ** 2
+
+            if total_variance == 0:
+                return self.max_position
+
+            # Kelly position size with uncertainty
+            position_size = self.kelly_fraction * (mu_posterior / total_variance)
+
+            # Alternative formulation (more conservative):
+            # Shrinks position when posterior variance is large relative to mean
+            # position_size *= (1 - sigma_posterior**2 / (mu_posterior**2 + 1e-6))
+
         else:
-            # Conservative fallback: use edge/2
-            edge_variance = (edge ** 2) / 4
+            # Original non-Bayesian Kelly
+            if pair_id in self.spread_velocity_history and len(self.spread_velocity_history[pair_id]) > 5:
+                velocities = self.spread_velocity_history[pair_id]
+                edge_variance = np.var(velocities)
+            else:
+                edge_variance = (edge ** 2) / 4
 
-        if edge_variance == 0:
-            return self.max_position
+            if edge_variance == 0:
+                return self.max_position
 
-        # Kelly fraction
-        position_size = self.kelly_fraction * (edge / np.sqrt(edge_variance))
+            position_size = self.kelly_fraction * (edge / np.sqrt(edge_variance))
+
+        # Apply bounds
         position_size = min(position_size, self.max_position)
         position_size = max(position_size, 0.0)
 
@@ -572,6 +649,8 @@ class SpreadDynamicsStrategy(Strategy):
                                 current_spread: float, reason: str) -> List[Signal]:
         """
         Generate signals to close both legs of a spread trade.
+
+        Updates Bayesian posterior based on realized trade outcome.
 
         Args:
             position_key: Position identifier
@@ -585,6 +664,24 @@ class SpreadDynamicsStrategy(Strategy):
         """
         signals = []
         position = self.spread_positions[position_key]
+
+        # BAYESIAN UPDATE: Calculate realized return for this trade
+        event_id, near_market_id, far_market_id = position_key
+        pair_id = f"{event_id}_{near_market_id}_{far_market_id}"
+
+        entry_spread = position['entry_spread']
+        spread_change = current_spread - entry_spread
+
+        # Realized return depends on trade type:
+        # - Compression: profit when spread narrows (spread_change < 0)
+        # - Widening: profit when spread widens (spread_change > 0)
+        if position['trade_type'] == 'compression':
+            realized_return = -spread_change  # Negative change = profit
+        else:  # widening
+            realized_return = spread_change   # Positive change = profit
+
+        # Update Bayesian posterior with this observation
+        self.update_edge_posterior(pair_id, realized_return)
 
         # Close near leg (reverse the original trade)
         if position['trade_type'] == 'compression':
@@ -731,3 +828,29 @@ class SpreadDynamicsStrategy(Strategy):
         self.volume_history = {}
         self.last_refit_date = None
         self.spread_velocity_history = {}
+        # Reset Bayesian posteriors to prior
+        self.edge_posterior = defaultdict(lambda: {
+            'mu': self.prior_edge_mean,
+            'sigma': self.prior_edge_std,
+            'n_obs': 0
+        })
+
+    def get_posterior_stats(self) -> pd.DataFrame:
+        """
+        Get summary statistics of Bayesian posteriors for all pairs.
+
+        Returns:
+            DataFrame with posterior mean, std, and number of observations per pair
+        """
+        stats = []
+        for pair_id, posterior in self.edge_posterior.items():
+            stats.append({
+                'pair_id': pair_id,
+                'posterior_mean': posterior['mu'],
+                'posterior_std': posterior['sigma'],
+                'n_observations': posterior['n_obs'],
+                'prior_std': self.prior_edge_std,
+                'uncertainty_reduction': 1 - (posterior['sigma'] / self.prior_edge_std)
+            })
+
+        return pd.DataFrame(stats) if stats else pd.DataFrame()

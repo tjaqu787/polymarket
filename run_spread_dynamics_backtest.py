@@ -38,6 +38,11 @@ strategy = SpreadDynamicsStrategy(config={
     "max_position": 0.10,            # Max position size per leg
     "max_event_exposure": 0.20,      # Max total exposure per event
     "min_pair_correlation": 0.60,    # Minimum historical price correlation
+    # Bayesian Kelly parameters
+    "use_bayesian_kelly": True,      # Enable Bayesian position sizing
+    "prior_edge_mean": 0.0,          # Prior belief: no edge initially
+    "prior_edge_std": 0.05,          # Prior uncertainty (wide)
+    "obs_std": 0.02,                 # Observation noise
 })
 
 data_loader = DataLoader(DB_PATH)
@@ -73,11 +78,46 @@ if not results:
 
 engine.print_results()
 
+# Bayesian Analysis
+print("\n" + "="*60)
+print("BAYESIAN POSTERIOR ANALYSIS")
+print("="*60)
+
+posterior_stats = strategy.get_posterior_stats()
+if not posterior_stats.empty:
+    print(f"\nNumber of pairs traded: {len(posterior_stats)}")
+    print(f"\nPosterior Statistics:")
+    print(f"  Avg posterior mean:     {posterior_stats['posterior_mean'].mean():.6f}")
+    print(f"  Avg posterior std:      {posterior_stats['posterior_std'].mean():.6f}")
+    print(f"  Avg prior std:          {posterior_stats['prior_std'].mean():.6f}")
+    print(f"  Avg uncertainty reduction: {posterior_stats['uncertainty_reduction'].mean()*100:.1f}%")
+    print(f"  Total observations:     {posterior_stats['n_observations'].sum()}")
+
+    print(f"\nTop 10 pairs by certainty (lowest posterior std):")
+    top_certain = posterior_stats.nsmallest(10, 'posterior_std')[
+        ['pair_id', 'posterior_mean', 'posterior_std', 'n_observations']
+    ]
+    print(top_certain.to_string(index=False))
+
+    print(f"\nTop 10 pairs by positive edge (highest posterior mean):")
+    top_edge = posterior_stats.nlargest(10, 'posterior_mean')[
+        ['pair_id', 'posterior_mean', 'posterior_std', 'n_observations']
+    ]
+    print(top_edge.to_string(index=False))
+
+    # Save posterior analysis
+    posterior_stats.to_csv("backtest_results/bayesian_posteriors.csv", index=False)
+    print(f"\nBayesian posteriors saved to: backtest_results/bayesian_posteriors.csv")
+else:
+    print("\nNo posterior data available.")
+
+print("\n" + "="*60 + "\n")
+
 # Save trades
 os.makedirs("backtest_results", exist_ok=True)
 if not results["trades"].empty:
     out = "backtest_results/spread_dynamics_trades.csv"
     results["trades"].to_csv(out, index=False)
-    print(f"\nTrades saved to: {out}")
+    print(f"Trades saved to: {out}")
 else:
-    print("\nNo trades executed.")
+    print("No trades executed.")
