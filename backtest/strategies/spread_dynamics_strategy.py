@@ -70,38 +70,34 @@ class SpreadDynamicsStrategy(Strategy):
         Calculate volume z-score for regime classification.
 
         Args:
-            event_id: Event group ID
+            event_id: Event group ID (not used, data is pre-filtered)
             current_date: Current date
-            data: Historical data
+            data: Historical data (pre-filtered for this event)
 
         Returns:
             Volume z-score (standardized volume change)
         """
-        # Get volume history for this event
-        event_data = data[data['group_col'] == event_id].copy()
-
-        if event_data.empty:
+        # Data is already filtered for this event, no need to filter again
+        if data.empty:
             return 0.0
 
-        # Aggregate volume by date (sum across all markets in event)
-        daily_volume = event_data.groupby('date')['volume_num'].sum().sort_index()
+        # OPTIMIZATION: Vectorized volume aggregation
+        daily_volume = data.groupby('date')['volume_num'].sum()
 
         if len(daily_volume) < self.vol_lookback_days + 1:
             return 0.0
 
-        # Get recent volume history
+        # Get recent volume history (vectorized filtering)
         lookback_end = current_date - pd.Timedelta(days=1)
         lookback_start = lookback_end - pd.Timedelta(days=self.vol_lookback_days)
 
-        recent_volumes = daily_volume[
-            (daily_volume.index >= lookback_start) &
-            (daily_volume.index <= lookback_end)
-        ]
+        recent_volumes = daily_volume[(daily_volume.index >= lookback_start) &
+                                      (daily_volume.index <= lookback_end)]
 
         if len(recent_volumes) < 2:
             return 0.0
 
-        # Calculate z-score
+        # Vectorized z-score calculation
         current_volume = daily_volume.get(current_date, 0)
         mean_volume = recent_volumes.mean()
         std_volume = recent_volumes.std()
@@ -118,21 +114,20 @@ class SpreadDynamicsStrategy(Strategy):
         Build adjacent pairs of contracts for spread trading.
 
         Args:
-            event_id: Event group ID
+            event_id: Event group ID (not used, data is pre-filtered)
             current_date: Current date
-            data: Market data
+            data: Market data (pre-filtered for this event)
 
         Returns:
             List of (near_contract, far_contract) tuples
         """
         pairs = []
 
-        # Get all active contracts for this event on this date
+        # Data is already filtered for this event, just filter by date and outcome
         event_data = data[
-            (data['group_col'] == event_id) &
             (data['date'] == current_date) &
             (data['outcome'] == 'No')
-        ].copy()
+        ]
 
         if event_data.empty:
             return pairs
@@ -236,14 +231,21 @@ class SpreadDynamicsStrategy(Strategy):
         Args:
             pair_id: Unique pair identifier
             current_date: Current date
-            data: Historical data
+            data: Historical data (pre-filtered for this event)
             near_market_id: Near contract market ID
             far_market_id: Far contract market ID
 
         Returns:
             DataFrame with dates and spread values, or None if insufficient data
         """
-        # Get historical data for both markets
+        # OPTIMIZATION: Check cache first
+        if pair_id in self.spread_history:
+            cached = self.spread_history[pair_id]
+            # If cache has current_date, return it
+            if current_date in cached['date'].values:
+                return cached[cached['date'] <= current_date]
+
+        # Get historical data for both markets (data is already event-filtered)
         near_data = data[
             (data['market_id'] == near_market_id) &
             (data['outcome'] == 'No') &
@@ -270,25 +272,33 @@ class SpreadDynamicsStrategy(Strategy):
         if len(merged) < self.lookback_days:
             return None
 
+        # OPTIMIZATION: Vectorized spread calculation instead of iterrows
+        # Convert to numpy arrays for faster computation
+        price_near = merged['price_near'].values
+        price_far = merged['price_far'].values
+        tte_near = merged['time_to_expiration_near'].values
+        tte_far = merged['time_to_expiration_far'].values
+
+        # Clip prices to avoid log(0) or log(negative)
+        yes_price_near = np.clip(1 - price_near, 1e-6, 1-1e-6)
+        yes_price_far = np.clip(1 - price_far, 1e-6, 1-1e-6)
+
+        # Vectorized implied rate calculation: λ = -ln(1-p) / t
+        lambda_near = -np.log(yes_price_near) / tte_near
+        lambda_far = -np.log(yes_price_far) / tte_far
+
         # Calculate spreads
-        spreads = []
-        for _, row in merged.iterrows():
-            lambda_near = calculate_implied_rate(
-                row['price_near'], row['time_to_expiration_near']
-            )
-            lambda_far = calculate_implied_rate(
-                row['price_far'], row['time_to_expiration_far']
-            )
-
-            if pd.isna(lambda_near) or pd.isna(lambda_far):
-                spreads.append(np.nan)
-            else:
-                spreads.append(lambda_far - lambda_near)
-
+        spreads = lambda_far - lambda_near
         merged['spread'] = spreads
         merged = merged.dropna(subset=['spread'])
 
-        return merged[['date', 'spread']]
+        result = merged[['date', 'spread']]
+
+        # OPTIMIZATION: Cache the result (keep last 30 days to limit memory)
+        if len(result) > 0:
+            self.spread_history[pair_id] = result.tail(30)
+
+        return result
 
     def generate_spread_signals(self, event_id: str, current_date: pd.Timestamp,
                                data: pd.DataFrame) -> List[Signal]:
@@ -666,15 +676,23 @@ class SpreadDynamicsStrategy(Strategy):
         if 'group_col' not in data.columns:
             return signals
 
-        event_groups = data[data['date'] <= current_date]['group_col'].unique()
+        # OPTIMIZATION: Filter to recent window only (lookback + vol lookback)
+        # We only need last N days for spread velocity and volume regime
+        max_lookback = max(self.lookback_days, self.vol_lookback_days) + 2  # +2 buffer
+        cutoff_date = current_date - pd.Timedelta(days=max_lookback)
+        recent_data = data[data['date'] >= cutoff_date]
+
+        # OPTIMIZATION: Pre-group by event to avoid repeated filtering
+        # This reduces 6,572 full scans to 1 groupby operation
+        grouped = recent_data.groupby('group_col')
 
         # Process each event group
-        for event_id in event_groups:
+        for event_id, event_data in grouped:
             if pd.isna(event_id):
                 continue
 
-            # Generate signals for this event
-            event_signals = self.generate_spread_signals(event_id, current_date, data)
+            # Generate signals for this event (pass pre-filtered data)
+            event_signals = self.generate_spread_signals(event_id, current_date, event_data)
             signals.extend(event_signals)
 
         return signals
