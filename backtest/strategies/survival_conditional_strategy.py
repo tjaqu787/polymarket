@@ -76,6 +76,16 @@ class SurvivalConditionalStrategy(Strategy):
         self.edges_collapsed = 0
         self.rolled_forward = 0
 
+        # Debug statistics
+        self.event_groups_processed = 0
+        self.cdf_fits_attempted = 0
+        self.cdf_fits_succeeded = 0
+        self.cdf_fits_failed = 0
+        self.markets_evaluated = 0
+        self.conditional_probs_computed = 0
+        self.conditional_probs_failed = 0
+        self.edges_computed = []  # Track all edges for analysis
+
         # Load data loader
         from backtest.data_loader import DataLoader
         self.data_loader = DataLoader(self.db_path)
@@ -97,42 +107,86 @@ class SurvivalConditionalStrategy(Strategy):
         """
         try:
             # Import the Gamma fitter
-            from models.factored_gamma_model.gamma_fitter import GammaCDFFitter
+            from models.factored_gamma_model.gamma_cdf_fitter import GammaCDFFitter
 
             # Extract term structure: time to expiry vs Yes price
+            # Group by bucketed expiry (14-day buckets) to handle near-identical dates
             term_structure = []
             for _, row in event_data.iterrows():
                 if row['outcome'] == 'Yes':
                     tte_days = (row['resolution_date'] - current_date).days
                     if tte_days > 0:
+                        # Round to nearest 14-day bucket (bi-weekly)
+                        tte_bucket = round(tte_days / 14) * 14
                         term_structure.append({
-                            'time_to_expiry': tte_days / 365.25,  # Convert to years
+                            'tte_bucket': tte_bucket,
+                            'time_to_expiry': tte_days / 365.25,  # Keep original for averaging
                             'yes_price': row['price']
                         })
 
             if len(term_structure) < 2:
+                if not hasattr(self, '_insufficient_data_count'):
+                    self._insufficient_data_count = 0
+                self._insufficient_data_count += 1
                 return None
 
             df_term = pd.DataFrame(term_structure)
 
-            # Fit Gamma CDF
-            fitter = GammaCDFFitter()
-            success, params = fitter.fit(
-                times=df_term['time_to_expiry'].values,
-                cumulative_probs=df_term['yes_price'].values
-            )
+            # Group by bucket and average prices
+            df_bucketed = df_term.groupby('tte_bucket').agg({
+                'time_to_expiry': 'mean',  # Average time within bucket
+                'yes_price': 'mean'         # Average price within bucket
+            }).reset_index()
 
-            if not success:
+            # Need at least 2 distinct buckets
+            if len(df_bucketed) < 2:
+                if not hasattr(self, '_insufficient_data_count'):
+                    self._insufficient_data_count = 0
+                self._insufficient_data_count += 1
                 return None
 
-            # Create CDF function F(t)
-            def cdf_func(t_years):
-                """Return P(event by time t)"""
-                return fitter.cdf(t_years, params['shape'], params['rate'])
+            # Sort by time
+            df_bucketed = df_bucketed.sort_values('time_to_expiry')
 
-            return cdf_func
+            # Fit Gamma CDF
+            fitter = GammaCDFFitter()
+            try:
+                params = fitter.fit(
+                    times=df_bucketed['time_to_expiry'].values,
+                    cdf_values=df_bucketed['yes_price'].values
+                )
+
+                alpha = params['alpha']
+                beta = params['beta']
+
+                # Create CDF function F(t)
+                def cdf_func(t_years):
+                    """Return P(event by time t)"""
+                    return fitter.predict_cdf(np.array([t_years]), alpha, beta)[0]
+
+                return cdf_func
+
+            except (ValueError, RuntimeError) as e:
+                if not hasattr(self, '_fitter_failure_count'):
+                    self._fitter_failure_count = 0
+                    self._fitter_error_samples = []
+                self._fitter_failure_count += 1
+                # Store first 10 errors for debugging
+                if len(self._fitter_error_samples) < 10:
+                    self._fitter_error_samples.append({
+                        'error': str(e),
+                        'num_points': len(term_structure),
+                        'num_buckets': len(df_bucketed),
+                        'time_range': (df_bucketed['time_to_expiry'].min(), df_bucketed['time_to_expiry'].max()),
+                        'price_range': (df_bucketed['yes_price'].min(), df_bucketed['yes_price'].max())
+                    })
+                return None
 
         except Exception as e:
+            if not hasattr(self, '_exception_count'):
+                self._exception_count = 0
+                self._last_exception = str(e)
+            self._exception_count += 1
             return None
 
     def _compute_conditional_probability(
@@ -233,6 +287,7 @@ class SurvivalConditionalStrategy(Strategy):
             if pd.isna(event_id):
                 continue
 
+            self.event_groups_processed += 1
             event_data = data[data[group_col] == event_id].copy()
 
             # Filter for active markets with sufficient volume
@@ -259,9 +314,13 @@ class SurvivalConditionalStrategy(Strategy):
 
             # Refit CDF if needed
             if self._should_refit(event_id, current_date):
+                self.cdf_fits_attempted += 1
                 cdf_func = self._fit_cdf_for_event(event_id, event_data, current_date)
                 if cdf_func is not None:
                     self.fitted_models[event_id] = (current_date, cdf_func)
+                    self.cdf_fits_succeeded += 1
+                else:
+                    self.cdf_fits_failed += 1
 
             # Skip if no fitted model
             if event_id not in self.fitted_models:
@@ -274,6 +333,7 @@ class SurvivalConditionalStrategy(Strategy):
                 if row['outcome'] != 'Yes':
                     continue
 
+                self.markets_evaluated += 1
                 market_id = row['market_id']
                 market_price = row['price']
                 t2_years = row['days_to_expiry'] / 365.25
@@ -287,13 +347,17 @@ class SurvivalConditionalStrategy(Strategy):
                 )
 
                 if conditional_fair is None:
+                    self.conditional_probs_failed += 1
                     continue
+                else:
+                    self.conditional_probs_computed += 1
 
                 # Compute edge
                 edge = market_price - conditional_fair
+                self.edges_computed.append(abs(edge))
 
                 # Check if we have a position
-                has_position = self.portfolio and (market_id, 'Yes') in self.portfolio.positions
+                has_position = self._portfolio and (market_id, 'Yes') in self._portfolio.positions
 
                 if has_position:
                     # Roll forward check: should we exit?
@@ -372,6 +436,39 @@ class SurvivalConditionalStrategy(Strategy):
         print(f"Trades executed:                 {self.trades_executed}")
         print(f"Edges collapsed (exits):         {self.edges_collapsed}")
         print(f"Roll forward checks:             {self.rolled_forward}")
+        print(f"\nDebug Statistics:")
+        print(f"  Event groups processed:        {self.event_groups_processed}")
+        print(f"  CDF fits attempted:            {self.cdf_fits_attempted}")
+        print(f"  CDF fits succeeded:            {self.cdf_fits_succeeded}")
+        print(f"  CDF fits failed:               {self.cdf_fits_failed}")
+
+        # Breakdown of failure reasons
+        if hasattr(self, '_insufficient_data_count'):
+            print(f"    - Insufficient data (<2 points): {self._insufficient_data_count}")
+        if hasattr(self, '_fitter_failure_count'):
+            print(f"    - Fitter returned failure:       {self._fitter_failure_count}")
+            if hasattr(self, '_fitter_error_samples') and self._fitter_error_samples:
+                print(f"\n  Sample of fitter errors (first 10):")
+                for i, sample in enumerate(self._fitter_error_samples[:10], 1):
+                    print(f"    {i}. {sample['error']}")
+                    print(f"       Points: {sample['num_points']}, Buckets: {sample['num_buckets']}, Time: {sample['time_range']}, Price: {sample['price_range']}")
+        if hasattr(self, '_exception_count'):
+            print(f"    - Exceptions raised:             {self._exception_count}")
+            print(f"      Last exception: {self._last_exception}")
+
+        print(f"  Markets evaluated:             {self.markets_evaluated}")
+        print(f"  Conditional probs computed:    {self.conditional_probs_computed}")
+        print(f"  Conditional probs failed:      {self.conditional_probs_failed}")
+
+        if self.edges_computed:
+            edges_arr = np.array(self.edges_computed)
+            print(f"\nEdge Statistics:")
+            print(f"  Total edges computed:          {len(self.edges_computed)}")
+            print(f"  Mean absolute edge:            {edges_arr.mean():.4f} ({edges_arr.mean()*100:.2f}%)")
+            print(f"  Median absolute edge:          {np.median(edges_arr):.4f} ({np.median(edges_arr)*100:.2f}%)")
+            print(f"  Max absolute edge:             {edges_arr.max():.4f} ({edges_arr.max()*100:.2f}%)")
+            print(f"  Edges > threshold:             {(edges_arr >= self.min_survival_edge).sum()}")
+
         print(f"\nStrategy Parameters:")
         print(f"  Min survival edge:             {self.min_survival_edge*100:.1f}%")
         print(f"  Kelly fraction:                {self.kelly_fraction*100:.1f}%")

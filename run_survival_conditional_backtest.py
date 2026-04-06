@@ -58,6 +58,7 @@ print(f"Polymarket Backtest — Survival Conditional Strategy")
 print(f"{'='*70}")
 print(f"Strategy:              {strategy.name()}")
 print(f"DB:                    {DB_PATH}")
+print(f"Backtest Period:       2023-07-01 to 2026-03-16 (~2.7 years)")
 print(f"Initial Capital:       $10,000")
 print(f"Min Survival Edge:     {config['min_survival_edge']*100:.0f}%")
 print(f"Kelly Fraction:        {config['kelly_fraction']*100:.0f}%")
@@ -79,8 +80,8 @@ engine = BacktestEngine(
 print("Starting backtest...\n")
 
 results = engine.run(
-    start_date="2024-11-01",  # 2-month test period
-    end_date="2024-12-31",
+    start_date="2023-07-01",  # Full backtest period (2.5+ years)
+    end_date="2026-03-16",
     use_timing_markets=False,
     use_carry_markets=True,  # Use carry markets (all markets with semantic groups)
     min_volume=100,
