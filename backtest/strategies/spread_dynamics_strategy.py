@@ -594,37 +594,53 @@ class SpreadDynamicsStrategy(Strategy):
         """
         Calculate position size using Bayesian Kelly criterion.
 
-        Accounts for uncertainty in edge estimate by penalizing when posterior
-        variance is high (we're uncertain about true edge).
+        Combines observed signal (edge) with learned posterior beliefs.
+        Uncertainty penalty reduces bets when we're unsure about pair's true edge.
 
         Args:
             pair_id: Pair identifier
-            edge: Observed spread change magnitude (signal)
+            edge: Observed spread velocity (current signal strength)
 
         Returns:
             Position size as fraction of capital
         """
         if self.use_bayesian_kelly:
-            # Use Bayesian posterior instead of point estimate
             posterior = self.edge_posterior[pair_id]
             mu_posterior = posterior['mu']
             sigma_posterior = posterior['sigma']
+            n_obs = posterior['n_obs']
 
-            # Bayesian Kelly with uncertainty penalty:
-            # f = μ / (σ_obs² + σ_posterior²)
-            # This reduces position size when uncertain about edge
+            # Combine observed signal with posterior belief
+            # For new pairs (n_obs = 0), use observed edge
+            # For experienced pairs, blend observation with posterior
+            if n_obs == 0:
+                # No history: use observed edge but apply uncertainty penalty
+                effective_edge = edge
+            else:
+                # Blend observed signal with learned posterior
+                # Weight by inverse variance (precision)
+                precision_obs = 1 / (self.obs_std ** 2)
+                precision_posterior = 1 / (sigma_posterior ** 2)
+                total_precision = precision_obs + precision_posterior
+
+                # Precision-weighted average
+                effective_edge = (edge * precision_obs + mu_posterior * precision_posterior) / total_precision
+
+            # Bayesian Kelly with uncertainty penalty
+            # High posterior variance → reduce position size
             sigma_obs = self.obs_std
             total_variance = sigma_obs ** 2 + sigma_posterior ** 2
 
             if total_variance == 0:
                 return self.max_position
 
-            # Kelly position size with uncertainty
-            position_size = self.kelly_fraction * (mu_posterior / total_variance)
+            # Standard Kelly formula with effective edge and uncertainty-adjusted variance
+            position_size = self.kelly_fraction * (effective_edge / total_variance)
 
-            # Alternative formulation (more conservative):
-            # Shrinks position when posterior variance is large relative to mean
-            # position_size *= (1 - sigma_posterior**2 / (mu_posterior**2 + 1e-6))
+            # Additional uncertainty penalty for new pairs
+            if n_obs < 5:
+                uncertainty_discount = 1.0 - (5 - n_obs) * 0.1  # 0.5x for first trade, 1.0x after 5 trades
+                position_size *= max(uncertainty_discount, 0.5)
 
         else:
             # Original non-Bayesian Kelly
