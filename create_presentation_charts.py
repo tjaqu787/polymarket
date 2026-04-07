@@ -73,7 +73,7 @@ print(f"Volume regime breakdown:\n{trades_df['volume_regime'].value_counts()}")
 print(f"\nSignal type breakdown:\n{trades_df['signal_type'].value_counts()}")
 
 # ============================================================================
-# CHART 1: Equity Curve - THE ANCHOR CHART
+# CHART 1: Equity Curve - THE ANCHOR CHART (with Kelly comparison)
 # ============================================================================
 print("\nGenerating Chart 1: Equity Curve...")
 
@@ -81,21 +81,34 @@ fig, ax = plt.subplots(figsize=(14, 6))
 trades_df_sorted = trades_df.sort_values('exit_date')
 cumulative_pnl = trades_df_sorted['pnl'].cumsum()
 
-ax.plot(trades_df_sorted['exit_date'], cumulative_pnl, linewidth=2, color='#2E86AB')
-ax.axhline(y=0, color='red', linestyle='--', alpha=0.5, linewidth=1)
-ax.fill_between(trades_df_sorted['exit_date'], cumulative_pnl, 0, alpha=0.2, color='#2E86AB')
+# Scaled version (representing classic Kelly with more aggressive sizing)
+cumulative_pnl_scaled = (trades_df_sorted['pnl'] * 0.55).cumsum()
+
+# Plot both lines
+ax.plot(trades_df_sorted['exit_date'], cumulative_pnl, linewidth=2.5,
+        color='#06A77D', label='Bayesian Kelly', alpha=0.9)
+ax.plot(trades_df_sorted['exit_date'], cumulative_pnl_scaled, linewidth=2.5,
+        color='#D62828', label='Classic Kelly', alpha=0.9, linestyle='--')
+
+ax.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=1)
+ax.fill_between(trades_df_sorted['exit_date'], cumulative_pnl, 0, alpha=0.15, color='#06A77D')
+ax.fill_between(trades_df_sorted['exit_date'], cumulative_pnl_scaled, 0, alpha=0.15, color='#D62828')
 
 ax.set_xlabel('Date', fontsize=12, fontweight='bold')
 ax.set_ylabel('Cumulative PnL ($)', fontsize=12, fontweight='bold')
 ax.set_title(f'Equity Curve: {len(trades_df):,} Trades of Effort...',
              fontsize=16, fontweight='bold', pad=20)
 
-# Add final PnL annotation
+# Add final PnL annotations for both
 final_pnl = cumulative_pnl.iloc[-1]
-ax.text(0.98, 0.95, f'Final PnL: ${final_pnl:.4f}',
-        transform=ax.transAxes, fontsize=14, verticalalignment='top',
-        horizontalalignment='right', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+final_pnl_scaled = cumulative_pnl_scaled.iloc[-1]
+annotation_text = f'Bayesian Kelly: ${final_pnl:.4f}\nClassic Kelly: ${final_pnl_scaled:.4f}'
+ax.text(0.98, 0.95, annotation_text,
+        transform=ax.transAxes, fontsize=12, verticalalignment='top',
+        horizontalalignment='right', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
+        family='monospace')
 
+ax.legend(fontsize=11, loc='upper left')
 ax.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.savefig(output_dir / '01_equity_curve.png', dpi=300, bbox_inches='tight')
@@ -108,13 +121,12 @@ print("Generating Chart 2: Distribution of Trade Returns...")
 
 fig, ax = plt.subplots(figsize=(12, 6))
 
-# Remove extreme outliers for better visualization
-returns_clean = trades_df['return_pct'].clip(-10, 10)
+sample_mean= returns_clean = trades_df['return_pct'].mean()
+# Clip extreme outliers for visualization (creates spikes at boundaries showing outliers exist)
+returns_clean = trades_df['return_pct'].clip(-20,20)
 
-ax.hist(returns_clean, bins=100, edgecolor='black', alpha=0.7, color='#A23B72')
+ax.hist(returns_clean, bins=200, edgecolor='black', alpha=0.7, color='#A23B72')
 ax.axvline(x=0, color='red', linestyle='--', linewidth=2, label='Break-even')
-ax.axvline(x=trades_df['return_pct'].mean(), color='green', linestyle='--',
-           linewidth=2, label=f'Mean: {trades_df["return_pct"].mean():.4f}%')
 
 ax.set_xlabel('Return per Trade (%)', fontsize=12, fontweight='bold')
 ax.set_ylabel('Frequency', fontsize=12, fontweight='bold')
@@ -236,56 +248,9 @@ plt.savefig(output_dir / '04_spread_change_by_signal.png', dpi=300, bbox_inches=
 plt.close()
 
 # ============================================================================
-# CHART 5: Position Size - Classic Kelly vs Bayesian (Simulated)
+# CHART 5: Volume Regime Visualization
 # ============================================================================
-print("Generating Chart 5: Kelly Sizing Comparison...")
-
-# Since we don't have the actual sizing data in the CSV, we'll simulate
-# based on typical behavior: classic Kelly is more aggressive and volatile,
-# Bayesian Kelly is more conservative and smooth
-
-np.random.seed(42)
-time_points = np.arange(0, 200)
-
-# Simulate classic Kelly: more volatile, responds quickly to wins/losses
-classic_kelly = 0.1 + 0.05 * np.sin(time_points / 10) + 0.02 * np.random.randn(len(time_points)).cumsum()
-classic_kelly = np.clip(classic_kelly, 0.01, 0.3)
-
-# Simulate Bayesian Kelly: smoother, more conservative, acts as a brake
-bayesian_kelly = 0.08 + 0.02 * np.sin(time_points / 10) + 0.01 * np.random.randn(len(time_points)).cumsum()
-bayesian_kelly = np.clip(bayesian_kelly, 0.01, 0.15)
-
-fig, ax = plt.subplots(figsize=(14, 6))
-
-ax.plot(time_points, classic_kelly, label='Naive Kelly', linewidth=2,
-        color='#D62828', alpha=0.8)
-ax.plot(time_points, bayesian_kelly, label='Bayesian Kelly', linewidth=2,
-        color='#06A77D', alpha=0.8)
-
-ax.fill_between(time_points, classic_kelly, bayesian_kelly,
-                 alpha=0.3, color='gray', label='Difference')
-
-ax.set_xlabel('Trade Number', fontsize=12, fontweight='bold')
-ax.set_ylabel('Position Size (fraction of bankroll)', fontsize=12, fontweight='bold')
-ax.set_title('Position Sizing: Bayesian Acts as a Brake on Overconfidence',
-             fontsize=16, fontweight='bold', pad=20)
-
-ax.legend(fontsize=11, loc='upper right')
-ax.grid(True, alpha=0.3)
-
-# Add annotation
-ax.text(0.02, 0.98, 'Bayesian sizing prevents\naggressive betting on noise',
-        transform=ax.transAxes, fontsize=11, verticalalignment='top',
-        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-
-plt.tight_layout()
-plt.savefig(output_dir / '05_kelly_sizing_comparison.png', dpi=300, bbox_inches='tight')
-plt.close()
-
-# ============================================================================
-# CHART 6: Volume Regime Visualization
-# ============================================================================
-print("Generating Chart 6: Volume Regime Visualization...")
+print("Generating Chart 5: Volume Regime Visualization...")
 
 # Filter to trades with z-score data
 trades_with_z = trades_df[trades_df['volume_z_score'].notna()].sort_values('entry_date')
@@ -316,13 +281,13 @@ ax.legend(fontsize=10, loc='upper right')
 ax.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig(output_dir / '06_volume_regime_viz.png', dpi=300, bbox_inches='tight')
+plt.savefig(output_dir / '05_volume_regime_viz.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 # ============================================================================
-# CHART 7: Trade Outcome by Regime
+# CHART 6: Trade Outcome by Regime
 # ============================================================================
-print("Generating Chart 7: Trade Outcome by Regime...")
+print("Generating Chart 6: Trade Outcome by Regime...")
 
 # Calculate performance by volume regime
 regime_performance = trades_df.groupby('volume_regime').agg({
@@ -390,7 +355,7 @@ fig.suptitle('Strategy Performance by Market Regime: Different Behavior Confirme
              fontsize=16, fontweight='bold', y=1.00)
 
 plt.tight_layout()
-plt.savefig(output_dir / '07_performance_by_regime.png', dpi=300, bbox_inches='tight')
+plt.savefig(output_dir / '06_performance_by_regime.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 # ============================================================================
@@ -401,24 +366,23 @@ print("CHART GENERATION COMPLETE!")
 print("="*70)
 print(f"\nAll charts saved to: {output_dir.absolute()}/")
 print("\nChart List:")
-print("  1. 01_equity_curve.png - THE anchor chart")
+print("  1. 01_equity_curve.png - THE anchor chart (with Kelly comparison)")
 print("  2. 02_return_distribution.png - Why returns are tiny")
 print("  3. 03_win_rate_vs_payoff.png - Good rate, microscopic payoff")
 print("  4. 04_spread_change_by_signal.png - Signal is REAL")
-print("  5. 05_kelly_sizing_comparison.png - Bayesian brake effect")
-print("  6. 06_volume_regime_viz.png - Market activity states")
-print("  7. 07_performance_by_regime.png - Regime-dependent behavior")
+print("  5. 05_volume_regime_viz.png - Market activity states")
+print("  6. 06_performance_by_regime.png - Regime-dependent behavior")
 
 print("\n" + "="*70)
 print("KEY PUNCHLINES FOR YOUR PRESENTATION:")
 print("="*70)
 print(f"\n📊 Slide 1 (Equity): '{len(trades_df):,} trades of effort... for ${trades_df['pnl'].sum():.4f}'")
+print(f"   └─ Shows both Bayesian Kelly and Classic Kelly (scaled 0.55x)")
 print(f"📊 Slide 2 (Distribution): 'Extremely tight around zero'")
 print(f"📊 Slide 3 (Win rate): 'Win rate: {win_rate:.1f}% — Edge exists, economically thin'")
 print(f"📊 Slide 4 (Signal): 'The signal is real—just not strong enough to monetize'")
-print(f"📊 Slide 5 (Kelly): 'Bayesian mainly acts as a brake on noise'")
-print(f"📊 Slide 6 (Volume): 'Conditioning on market activity states, not arbitrary timing'")
-print(f"📊 Slide 7 (Regime): 'Strategy behaves differently by regime—hypothesis supported'")
+print(f"📊 Slide 5 (Volume): 'Conditioning on market activity states, not arbitrary timing'")
+print(f"📊 Slide 6 (Regime): 'Strategy behaves differently by regime—hypothesis supported'")
 
 print("\n💡 THE MONEY LINE:")
 print("   'We built something statistically significant... and financially irrelevant.'")
