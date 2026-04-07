@@ -31,91 +31,88 @@ SpreadDynamicsStrategy = module.SpreadDynamicsStrategy
 DB_PATH = "data/polymarket.db"
 
 # Define prior_std values to test
-# Sample from tight (0.01) to loose (0.30) priors
-PRIOR_STD_VALUES = [
-    0.01,  # Very tight prior (very confident in no edge)
-    0.02,  # Tight
-    0.03,
-    0.05,  # Current default
-    0.07,
-    0.10,  # Loose
-    0.15,
-    0.20,  # Very loose
-    0.25,
-    0.30,  # Extremely loose (nearly uninformative)
-]
+# Uniformly sample 30 values between 0.01 and 0.30
+N_SAMPLES = 30
+PRIOR_STD_VALUES = np.linspace(0.01, 0.30, N_SAMPLES).tolist()
 
 def run_backtest_with_prior(prior_std, verbose=False):
     """Run backtest with specified prior_std value."""
 
-    strategy = SpreadDynamicsStrategy(config={
-        "db_path": DB_PATH,
-        "lookback_days": 7,
-        "vol_lookback_days": 3,
-        "vol_spike_threshold": 2.0,
-        "vol_drought_threshold": -0.5,
-        "min_spread_change": 0.05,
-        "min_spread_level": 0.02,
-        "min_tte_days": 14,
-        "min_volume": 300,
-        "kelly_fraction": 0.25,
-        "max_position": 0.10,
-        "max_event_exposure": 0.20,
-        "min_pair_correlation": 0.60,
-        # Bayesian Kelly parameters - varying prior_edge_std
-        "use_bayesian_kelly": True,
-        "prior_edge_mean": 0.0,
-        "prior_edge_std": prior_std,  # THIS IS WHAT WE'RE VARYING
-        "obs_std": 0.02,
-    })
+    # Add some error handling and resource management
+    try:
+        strategy = SpreadDynamicsStrategy(config={
+            "db_path": DB_PATH,
+            "lookback_days": 7,
+            "vol_lookback_days": 3,
+            "vol_spike_threshold": 2.0,
+            "vol_drought_threshold": -0.5,
+            "min_spread_change": 0.05,
+            "min_spread_level": 0.02,
+            "min_tte_days": 14,
+            "min_volume": 300,
+            "kelly_fraction": 0.25,
+            "max_position": 0.10,
+            "max_event_exposure": 0.20,
+            "min_pair_correlation": 0.60,
+            # Bayesian Kelly parameters - varying prior_edge_std
+            "use_bayesian_kelly": True,
+            "prior_edge_mean": 0.0,
+            "prior_edge_std": prior_std,  # THIS IS WHAT WE'RE VARYING
+            "obs_std": 0.02,
+        })
 
-    data_loader = DataLoader(DB_PATH)
+        data_loader = DataLoader(DB_PATH)
 
-    engine = BacktestEngine(
-        strategy=strategy,
-        data_loader=data_loader,
-        initial_capital=10_000.0,
-        commission=0.0,
-        max_position_size=0.1,
-        max_positions=None,
-        verbose=False,  # Suppress output for batch processing
-    )
+        engine = BacktestEngine(
+            strategy=strategy,
+            data_loader=data_loader,
+            initial_capital=10_000.0,
+            commission=0.0,
+            max_position_size=0.1,
+            max_positions=None,
+            verbose=False,  # Suppress output for batch processing
+        )
 
-    results = engine.run(
-        start_date="2024-01-01",
-        end_date="2026-03-16",
-        use_timing_markets=True,
-        min_volume=300,
-    )
+        results = engine.run(
+            start_date="2024-01-01",
+            end_date="2026-03-16",
+            use_timing_markets=True,
+            min_volume=300,
+        )
 
-    if not results:
+        if not results:
+            return None
+
+        # Extract key metrics
+        trades = results.get('trades', [])
+        if not trades:
+            return None
+
+        trades_df = pd.DataFrame(trades)
+        total_pnl = trades_df['pnl'].sum()
+        n_trades = len(trades_df)
+        win_rate = (trades_df['pnl'] > 0).mean() * 100
+
+        # Get posterior stats
+        posterior_stats = strategy.get_posterior_stats()
+        avg_posterior_std = posterior_stats['posterior_std'].mean() if not posterior_stats.empty else np.nan
+        avg_uncertainty_reduction = posterior_stats['uncertainty_reduction'].mean() * 100 if not posterior_stats.empty else np.nan
+
+        return {
+            'prior_std': prior_std,
+            'total_pnl': total_pnl,
+            'n_trades': n_trades,
+            'win_rate': win_rate,
+            'avg_posterior_std': avg_posterior_std,
+            'avg_uncertainty_reduction': avg_uncertainty_reduction,
+            'mean_return': trades_df['return_pct'].mean(),
+            'std_return': trades_df['return_pct'].std(),
+        }
+
+    except Exception as e:
+        # Log error and return None
+        print(f"\n⚠️  Error in backtest with prior_std={prior_std:.3f}: {str(e)[:100]}")
         return None
-
-    # Extract key metrics
-    trades = results.get('trades', [])
-    if not trades:
-        return None
-
-    trades_df = pd.DataFrame(trades)
-    total_pnl = trades_df['pnl'].sum()
-    n_trades = len(trades_df)
-    win_rate = (trades_df['pnl'] > 0).mean() * 100
-
-    # Get posterior stats
-    posterior_stats = strategy.get_posterior_stats()
-    avg_posterior_std = posterior_stats['posterior_std'].mean() if not posterior_stats.empty else np.nan
-    avg_uncertainty_reduction = posterior_stats['uncertainty_reduction'].mean() * 100 if not posterior_stats.empty else np.nan
-
-    return {
-        'prior_std': prior_std,
-        'total_pnl': total_pnl,
-        'n_trades': n_trades,
-        'win_rate': win_rate,
-        'avg_posterior_std': avg_posterior_std,
-        'avg_uncertainty_reduction': avg_uncertainty_reduction,
-        'mean_return': trades_df['return_pct'].mean(),
-        'std_return': trades_df['return_pct'].std(),
-    }
 
 
 def main():
@@ -125,8 +122,9 @@ def main():
     print(f"\nTesting {len(PRIOR_STD_VALUES)} different prior_edge_std values...")
     print(f"Prior std range: [{min(PRIOR_STD_VALUES):.3f}, {max(PRIOR_STD_VALUES):.3f}]")
 
-    # Use all CPUs minus 1, or at least 1
-    n_workers = max(1, cpu_count() - 1)
+    # Use fewer workers to avoid memory issues and database locking
+    # SQLite can have issues with many concurrent readers
+    n_workers = min(4, max(1, cpu_count() - 2))
     print(f"Using {n_workers} parallel workers")
     print("\nRunning backtests in parallel...\n")
 
