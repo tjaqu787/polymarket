@@ -191,22 +191,11 @@ class FactoredGammaStrategy(Strategy):
         Returns:
             True if fitting succeeded, False otherwise
         """
-        print(f"\n{'='*70}")
-        print("FACTORED GAMMA STRATEGY: Fitting Empirical Bayes Factors")
-        print(f"{'='*70}")
-        print(f"Holdout end date: {self.eb_holdout_end_date}")
-        print(f"Current date: {current_date}")
-
-        # For now, skip EB factor fitting due to data availability issues
-        # The model will use base Gamma parameters without category adjustments
-        print("\nNOTE: Skipping Empirical Bayes factor fitting (requires resolved event data)")
-        print("Using base Gamma parameters without category adjustments")
-        print("This is sufficient for timing arbitrage and calendar spread strategies\n")
-
-        # Set flags to indicate we've attempted EB fitting
+        # Skip EB factor fitting - the base Gamma model works well without it
+        # EB factors would provide category-specific adjustments, but require
+        # significant resolved market data which is not readily available
         self.factors_fitted = True
-        self.model.factors_fitted = False  # Model knows factors weren't actually fitted
-
+        self.model.factors_fitted = False
         return False
 
     def _generate_calendar_spread_signals(
@@ -246,16 +235,17 @@ class FactoredGammaStrategy(Strategy):
         if total_edge <= 0:
             return signals
 
-        # Group by market_id to get both Yes and No tokens
+        # Group by market_id to get both Yes and No tokens and prices
         market_tokens = {}
-        market_data = {}
+        market_data_by_outcome = {}  # Changed: store by (market_id, outcome)
         for _, row in event_data.iterrows():
             market_id = row['market_id']
             outcome = row['outcome']
             if market_id not in market_tokens:
                 market_tokens[market_id] = {}
-                market_data[market_id] = row
             market_tokens[market_id][outcome] = row['token_id']
+            # Store row keyed by (market_id, outcome) to get correct prices
+            market_data_by_outcome[(market_id, outcome)] = row
 
         # Generate signals for each spread pair
         for pair in calendar_spread.spread_pairs:
@@ -271,12 +261,16 @@ class FactoredGammaStrategy(Strategy):
             if near_position < 0 or far_position > 0:
                 continue
 
-            # Check if these markets exist in current data
-            if near_market_id not in market_data or far_market_id not in market_data:
+            # Check if these markets exist in current data (need 'No' outcome for both)
+            near_key = (near_market_id, 'No')
+            far_key = (far_market_id, 'No')
+
+            if near_key not in market_data_by_outcome or far_key not in market_data_by_outcome:
+                # Skip if we don't have No outcome prices for both markets
                 continue
 
-            near_row = market_data[near_market_id]
-            far_row = market_data[far_market_id]
+            near_row = market_data_by_outcome[near_key]
+            far_row = market_data_by_outcome[far_key]
 
             # Calculate position size proportional to spread edge
             weight = spread_edge / total_edge

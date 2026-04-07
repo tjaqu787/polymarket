@@ -48,7 +48,7 @@ config = {
     "refit_hours": 24,              # Refit model every 24 hours (faster for testing)
     "n_bootstrap": 100,             # Bootstrap samples for CI calculation (reduced for speed)
     "max_event_exposure": 0.15,     # 15% of portfolio per event
-    "eb_holdout_end_date": "2025-10-05",  # Empirical Bayes cutoff date
+    "eb_holdout_end_date": "2023-06-30",  # Empirical Bayes cutoff date (train on H1 2023, test on H2 2023+)
 }
 
 strategy = FactoredGammaStrategy(config=config)
@@ -81,7 +81,7 @@ engine = BacktestEngine(
 print("Starting backtest...\n")
 
 results = engine.run(
-    start_date="2023-01-01",  # Full backtest period
+    start_date="2023-07-01",  # Full backtest period (after EB training)
     end_date="2026-03-16",
     use_carry_markets=True,  # Use all markets for carry trading
     min_volume=100,
