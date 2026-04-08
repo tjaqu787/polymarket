@@ -80,15 +80,17 @@ def run_backtest_with_prior(prior_std, verbose=False):
             min_volume=300,
         )
 
-        if not results:
+        if results is None or not results:
             return None
 
         # Extract key metrics
         trades = results.get('trades', [])
-        if not trades:
+        if trades is None or (isinstance(trades, list) and len(trades) == 0):
             return None
 
         trades_df = pd.DataFrame(trades)
+        if trades_df.empty:
+            return None
         total_pnl = trades_df['pnl'].sum()
         n_trades = len(trades_df)
         win_rate = (trades_df['pnl'] > 0).mean() * 100
