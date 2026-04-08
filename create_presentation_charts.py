@@ -25,9 +25,12 @@ trades_df = pd.read_csv('backtest_results/spread_dynamics_trades.csv')
 trades_df['entry_date'] = pd.to_datetime(trades_df['entry_date'])
 trades_df['exit_date'] = pd.to_datetime(trades_df['exit_date'])
 
+posteriors_df = pd.read_csv('backtest_results/bayesian_posteriors.csv')
+
 print(f"Total trades: {len(trades_df):,}")
 print(f"Total PnL: ${trades_df['pnl'].sum():.4f}")
 print(f"Mean return: {trades_df['return_pct'].mean():.4f}%")
+print(f"Bayesian pairs tracked: {len(posteriors_df):,}")
 
 # Extract volume regime information from reason field
 def extract_volume_regime(reason):
@@ -150,47 +153,60 @@ plt.savefig(output_dir / '02_return_distribution.png', dpi=300, bbox_inches='tig
 plt.close()
 
 # ============================================================================
-# CHART 3: Win Rate vs Avg Win/Loss
+# CHART 3: Bayesian Uncertainty Reduction
 # ============================================================================
-print("Generating Chart 3: Win Rate vs Avg Win/Loss...")
+print("Generating Chart 3: Bayesian Uncertainty Reduction...")
 
-wins = trades_df[trades_df['pnl'] > 0]
-losses = trades_df[trades_df['pnl'] < 0]
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
-win_rate = len(wins) / len(trades_df) * 100
-avg_win = wins['return_pct'].mean()
-avg_loss = losses['return_pct'].mean()
+# Chart 3a: Histogram of uncertainty reduction
+ax1.hist(posteriors_df['uncertainty_reduction'] * 100, bins=50,
+         edgecolor='black', alpha=0.7, color='#2E86AB')
+ax1.axvline(x=posteriors_df['uncertainty_reduction'].mean() * 100,
+            color='red', linestyle='--', linewidth=2,
+            label=f'Mean: {posteriors_df["uncertainty_reduction"].mean()*100:.1f}%')
 
-fig, ax = plt.subplots(figsize=(10, 6))
+ax1.set_xlabel('Uncertainty Reduction (%)', fontsize=12, fontweight='bold')
+ax1.set_ylabel('Frequency', fontsize=12, fontweight='bold')
+ax1.set_title('Learning from Data: Uncertainty Reduction', fontsize=13, fontweight='bold')
+ax1.legend(fontsize=11)
+ax1.grid(True, alpha=0.3)
 
-metrics = ['Win Rate\n(%)', 'Avg Win\n(%)', 'Avg Loss\n(%)']
-values = [win_rate, avg_win, avg_loss]
-colors = ['#2E86AB', '#06A77D', '#D62828']
+# Add stats box
+stats_text = f"""Mean: {posteriors_df['uncertainty_reduction'].mean()*100:.1f}%
+Median: {posteriors_df['uncertainty_reduction'].median()*100:.1f}%
+Std: {posteriors_df['uncertainty_reduction'].std()*100:.1f}%
+N pairs: {len(posteriors_df):,}"""
 
-bars = ax.bar(metrics, values, color=colors, edgecolor='black', linewidth=2, alpha=0.8)
+ax1.text(0.02, 0.98, stats_text, transform=ax1.transAxes, fontsize=10,
+         verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
+         family='monospace')
 
-# Add value labels on bars
-for bar, val in zip(bars, values):
-    height = bar.get_height()
-    ax.text(bar.get_x() + bar.get_width()/2., height,
-            f'{val:.3f}', ha='center', va='bottom' if val > 0 else 'top',
-            fontsize=14, fontweight='bold')
+# Chart 3b: Posterior std vs number of observations
+scatter = ax2.scatter(posteriors_df['n_observations'],
+                     posteriors_df['posterior_std'],
+                     c=posteriors_df['uncertainty_reduction'],
+                     s=60, alpha=0.6, cmap='viridis', edgecolors='black', linewidth=0.5)
 
-ax.axhline(y=0, color='black', linewidth=1)
-ax.set_ylabel('Value', fontsize=12, fontweight='bold')
-ax.set_title('Win Rate Looks Good, Payoffs Are Microscopic',
-             fontsize=16, fontweight='bold', pad=20)
+ax2.axhline(y=posteriors_df['prior_std'].iloc[0], color='red', linestyle='--',
+            linewidth=2, alpha=0.7, label=f'Prior: {posteriors_df["prior_std"].iloc[0]:.3f}')
 
-# Add expectancy calculation
-expectancy = (win_rate/100 * avg_win) + ((100-win_rate)/100 * avg_loss)
-ax.text(0.98, 0.02, f'Expectancy: {expectancy:.4f}%',
-        transform=ax.transAxes, fontsize=14, verticalalignment='bottom',
-        horizontalalignment='right', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
-        fontweight='bold')
+ax2.set_xlabel('Number of Observations', fontsize=12, fontweight='bold')
+ax2.set_ylabel('Posterior Standard Deviation', fontsize=12, fontweight='bold')
+ax2.set_title('More Data → Lower Uncertainty', fontsize=13, fontweight='bold')
+ax2.set_yscale('log')
+ax2.legend(fontsize=11)
+ax2.grid(True, alpha=0.3)
 
-ax.grid(True, alpha=0.3, axis='y')
+# Add colorbar
+cbar = plt.colorbar(scatter, ax=ax2)
+cbar.set_label('Uncertainty Reduction', fontsize=10, fontweight='bold')
+
+fig.suptitle('Bayesian Learning: The Model IS Getting Smarter',
+             fontsize=16, fontweight='bold', y=0.98)
+
 plt.tight_layout()
-plt.savefig(output_dir / '03_win_rate_vs_payoff.png', dpi=300, bbox_inches='tight')
+plt.savefig(output_dir / '03_bayesian_learning.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 # ============================================================================
@@ -368,7 +384,7 @@ print(f"\nAll charts saved to: {output_dir.absolute()}/")
 print("\nChart List:")
 print("  1. 01_equity_curve.png - THE anchor chart (with Kelly comparison)")
 print("  2. 02_return_distribution.png - Why returns are tiny")
-print("  3. 03_win_rate_vs_payoff.png - Good rate, microscopic payoff")
+print("  3. 03_bayesian_learning.png - Uncertainty reduction proof")
 print("  4. 04_spread_change_by_signal.png - Signal is REAL")
 print("  5. 05_volume_regime_viz.png - Market activity states")
 print("  6. 06_performance_by_regime.png - Regime-dependent behavior")
@@ -379,7 +395,7 @@ print("="*70)
 print(f"\n📊 Slide 1 (Equity): '{len(trades_df):,} trades of effort... for ${trades_df['pnl'].sum():.4f}'")
 print(f"   └─ Shows both Bayesian Kelly and Classic Kelly (scaled 0.55x)")
 print(f"📊 Slide 2 (Distribution): 'Extremely tight around zero'")
-print(f"📊 Slide 3 (Win rate): 'Win rate: {win_rate:.1f}% — Edge exists, economically thin'")
+print(f"📊 Slide 3 (Bayesian Learning): 'The model IS learning—uncertainty drops {posteriors_df['uncertainty_reduction'].mean()*100:.1f}% on average'")
 print(f"📊 Slide 4 (Signal): 'The signal is real—just not strong enough to monetize'")
 print(f"📊 Slide 5 (Volume): 'Conditioning on market activity states, not arbitrary timing'")
 print(f"📊 Slide 6 (Regime): 'Strategy behaves differently by regime—hypothesis supported'")
