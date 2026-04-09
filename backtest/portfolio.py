@@ -44,6 +44,7 @@ class Trade:
     return_pct: float
     holding_period_days: int
     reason: str = ""
+    metadata: Dict = field(default_factory=dict)
 
 
 @dataclass
@@ -249,7 +250,8 @@ class Portfolio:
             pnl=pnl,
             return_pct=return_pct,
             holding_period_days=holding_days,
-            reason=reason
+            reason=reason,
+            metadata=position.metadata
         )
 
         self.trades.append(trade)
@@ -302,12 +304,13 @@ class Portfolio:
         return (market_id, outcome) in self.positions
 
     def get_trades_df(self) -> pd.DataFrame:
-        """Get trades as DataFrame."""
+        """Get trades as DataFrame with metadata columns."""
         if not self.trades:
             return pd.DataFrame()
 
-        return pd.DataFrame([
-            {
+        records = []
+        for t in self.trades:
+            record = {
                 'trade_id': t.trade_id,
                 'market_id': t.market_id,
                 'token_id': t.token_id,
@@ -322,8 +325,36 @@ class Portfolio:
                 'holding_period_days': t.holding_period_days,
                 'reason': t.reason
             }
-            for t in self.trades
-        ])
+            # Flatten metadata into columns
+            if t.metadata:
+                # Add common spread trading metadata
+                record['trade_type'] = t.metadata.get('trade_type', '')
+                record['pair_id'] = t.metadata.get('pair_id', '')
+                record['spread_level'] = t.metadata.get('spread_level', np.nan)
+                record['spread_velocity'] = t.metadata.get('spread_velocity', np.nan)
+                record['vol_zscore'] = t.metadata.get('vol_zscore', np.nan)
+                record['regime_factor'] = t.metadata.get('regime_factor', np.nan)
+                record['volume'] = t.metadata.get('volume', np.nan)
+                record['leg'] = t.metadata.get('leg', '')
+                record['entry_spread'] = t.metadata.get('entry_spread', np.nan)
+                record['exit_spread'] = t.metadata.get('exit_spread', np.nan)
+            else:
+                # Fill with NaN if no metadata
+                record.update({
+                    'trade_type': '',
+                    'pair_id': '',
+                    'spread_level': np.nan,
+                    'spread_velocity': np.nan,
+                    'vol_zscore': np.nan,
+                    'regime_factor': np.nan,
+                    'volume': np.nan,
+                    'leg': '',
+                    'entry_spread': np.nan,
+                    'exit_spread': np.nan
+                })
+            records.append(record)
+
+        return pd.DataFrame(records)
 
     def get_history_df(self) -> pd.DataFrame:
         """Get portfolio history as DataFrame."""
