@@ -1,0 +1,8 @@
+we're looking at the spread dynamics strategy
+    1. can we add a factor to the baysian kelly criterion so we know what kind of trade this is so expectations are differnt between regime
+Next we're trading way to much we need better signal to noise
+    1. can you log what the volume is for any given trade 
+    2. I want you to suggest another metric for whats happening here
+    
+
+
