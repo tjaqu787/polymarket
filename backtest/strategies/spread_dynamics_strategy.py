@@ -57,6 +57,10 @@ class SpreadDynamicsStrategy(Strategy):
         self.obs_std = self.config.get('obs_std', 0.02)                 # Observation noise
         self.use_bayesian_kelly = self.config.get('use_bayesian_kelly', True)
 
+        # Regime-specific Kelly adjustments
+        self.compression_regime_factor = self.config.get('compression_regime_factor', 1.0)  # Scaling for compression trades
+        self.widening_regime_factor = self.config.get('widening_regime_factor', 0.85)     # Scaling for widening trades (more uncertain)
+
         # State tracking
         self.spread_positions = {}  # (event_id, near_market_id, far_market_id) -> trade info
         self.spread_history = {}  # pair_id -> DataFrame with spread time series
@@ -64,12 +68,18 @@ class SpreadDynamicsStrategy(Strategy):
         self.last_refit_date = None
         self.spread_velocity_history = {}  # pair_id -> list of velocities for variance estimation
 
-        # Bayesian posterior tracking: pair_id -> {'mu': mean, 'sigma': std, 'n_obs': count}
+        # Bayesian posterior tracking: (pair_id, trade_type) -> {'mu': mean, 'sigma': std, 'n_obs': count}
+        # Track separate posteriors for compression vs widening regimes
         self.edge_posterior = defaultdict(lambda: {
             'mu': self.prior_edge_mean,
             'sigma': self.prior_edge_std,
             'n_obs': 0
         })
+
+        # Signal-to-noise tracking
+        self.signal_history = []  # List of {date, pair_id, trade_type, spread_velocity, vol_zscore, traded: bool}
+        self.trade_count_by_date = defaultdict(int)  # date -> count
+        self.trade_count_by_regime = defaultdict(int)  # trade_type -> count
 
     @property
     def name(self) -> str:
@@ -435,10 +445,23 @@ class SpreadDynamicsStrategy(Strategy):
                 if (spread_velocity > 0 and volume_regime == 'news'):
                     # Position size based on edge
                     position_size = self._calculate_position_size(
-                        pair_id, abs(spread_velocity)
+                        pair_id, abs(spread_velocity), 'compression'
                     )
 
+                    # Track signal for signal-to-noise metrics
+                    self.signal_history.append({
+                        'date': current_date,
+                        'pair_id': pair_id,
+                        'trade_type': 'compression',
+                        'spread_velocity': spread_velocity,
+                        'vol_zscore': vol_zscore,
+                        'traded': position_size > 0
+                    })
+
                     if position_size > 0:
+                        # Track trade count by regime
+                        self.trade_count_by_regime['compression'] += 1
+                        self.trade_count_by_date[current_date] += 1
                         # SHORT far leg, LONG near leg
                         signals.append(Signal(
                             market_id=far['market_id'],
@@ -454,9 +477,11 @@ class SpreadDynamicsStrategy(Strategy):
                                 'spread_level': current_spread,
                                 'spread_velocity': spread_velocity,
                                 'vol_zscore': vol_zscore,
+                                'regime_factor': self.compression_regime_factor,
                                 'leg': 'far',
                                 'near_market_id': near['market_id'],
-                                'far_market_id': far['market_id']
+                                'far_market_id': far['market_id'],
+                                'volume': far['volume']
                             }
                         ))
 
@@ -474,9 +499,11 @@ class SpreadDynamicsStrategy(Strategy):
                                 'spread_level': current_spread,
                                 'spread_velocity': spread_velocity,
                                 'vol_zscore': vol_zscore,
+                                'regime_factor': self.compression_regime_factor,
                                 'leg': 'near',
                                 'near_market_id': near['market_id'],
-                                'far_market_id': far['market_id']
+                                'far_market_id': far['market_id'],
+                                'volume': near['volume']
                             }
                         ))
 
@@ -484,6 +511,7 @@ class SpreadDynamicsStrategy(Strategy):
                         self.spread_positions[position_key] = {
                             'trade_type': 'compression',
                             'entry_spread': current_spread,
+                            'entry_spread_velocity': spread_velocity,
                             'entry_date': current_date,
                             'entry_vol_zscore': vol_zscore,
                             'near_leg_size': position_size,
@@ -495,10 +523,23 @@ class SpreadDynamicsStrategy(Strategy):
                       (spread_velocity > 0 and volume_regime == 'inactive')):
 
                     position_size = self._calculate_position_size(
-                        pair_id, abs(spread_velocity)
+                        pair_id, abs(spread_velocity), 'widening'
                     )
 
+                    # Track signal for signal-to-noise metrics
+                    self.signal_history.append({
+                        'date': current_date,
+                        'pair_id': pair_id,
+                        'trade_type': 'widening',
+                        'spread_velocity': spread_velocity,
+                        'vol_zscore': vol_zscore,
+                        'traded': position_size > 0
+                    })
+
                     if position_size > 0:
+                        # Track trade count by regime
+                        self.trade_count_by_regime['widening'] += 1
+                        self.trade_count_by_date[current_date] += 1
                         # LONG far leg, SHORT near leg
                         signals.append(Signal(
                             market_id=far['market_id'],
@@ -514,9 +555,11 @@ class SpreadDynamicsStrategy(Strategy):
                                 'spread_level': current_spread,
                                 'spread_velocity': spread_velocity,
                                 'vol_zscore': vol_zscore,
+                                'regime_factor': self.widening_regime_factor,
                                 'leg': 'far',
                                 'near_market_id': near['market_id'],
-                                'far_market_id': far['market_id']
+                                'far_market_id': far['market_id'],
+                                'volume': far['volume']
                             }
                         ))
 
@@ -534,9 +577,11 @@ class SpreadDynamicsStrategy(Strategy):
                                 'spread_level': current_spread,
                                 'spread_velocity': spread_velocity,
                                 'vol_zscore': vol_zscore,
+                                'regime_factor': self.widening_regime_factor,
                                 'leg': 'near',
                                 'near_market_id': near['market_id'],
-                                'far_market_id': far['market_id']
+                                'far_market_id': far['market_id'],
+                                'volume': near['volume']
                             }
                         ))
 
@@ -544,6 +589,7 @@ class SpreadDynamicsStrategy(Strategy):
                         self.spread_positions[position_key] = {
                             'trade_type': 'widening',
                             'entry_spread': current_spread,
+                            'entry_spread_velocity': spread_velocity,
                             'entry_date': current_date,
                             'entry_vol_zscore': vol_zscore,
                             'near_leg_size': position_size,
@@ -552,17 +598,20 @@ class SpreadDynamicsStrategy(Strategy):
 
         return signals
 
-    def update_edge_posterior(self, pair_id: str, observed_return: float):
+    def update_edge_posterior(self, pair_id: str, observed_return: float, trade_type: str):
         """
         Bayesian update of edge posterior after observing a trade outcome.
 
         Uses Normal-Normal conjugate prior for analytical posterior.
+        Tracks separate posteriors for compression vs widening trades.
 
         Args:
             pair_id: Pair identifier
             observed_return: Realized return from the trade (spread change)
+            trade_type: Trade regime ('compression' or 'widening')
         """
-        posterior = self.edge_posterior[pair_id]
+        posterior_key = (pair_id, trade_type)
+        posterior = self.edge_posterior[posterior_key]
 
         # Prior: edge ~ N(μ₀, σ₀²)
         mu_prior = posterior['mu']
@@ -584,28 +633,32 @@ class SpreadDynamicsStrategy(Strategy):
         )
 
         # Update stored posterior
-        self.edge_posterior[pair_id] = {
+        self.edge_posterior[posterior_key] = {
             'mu': mu_posterior,
             'sigma': sigma_posterior,
             'n_obs': posterior['n_obs'] + 1
         }
 
-    def _calculate_position_size(self, pair_id: str, edge: float) -> float:
+    def _calculate_position_size(self, pair_id: str, edge: float, trade_type: str) -> float:
         """
-        Calculate position size using Bayesian Kelly criterion.
+        Calculate position size using Bayesian Kelly criterion with regime factor.
 
         Combines observed signal (edge) with learned posterior beliefs.
         Uncertainty penalty reduces bets when we're unsure about pair's true edge.
+        Regime factor adjusts sizing based on trade type (compression vs widening).
 
         Args:
             pair_id: Pair identifier
             edge: Observed spread velocity (current signal strength)
+            trade_type: Trade regime ('compression' or 'widening')
 
         Returns:
             Position size as fraction of capital
         """
         if self.use_bayesian_kelly:
-            posterior = self.edge_posterior[pair_id]
+            # Use regime-specific posterior: (pair_id, trade_type)
+            posterior_key = (pair_id, trade_type)
+            posterior = self.edge_posterior[posterior_key]
             mu_posterior = posterior['mu']
             sigma_posterior = posterior['sigma']
             n_obs = posterior['n_obs']
@@ -642,6 +695,10 @@ class SpreadDynamicsStrategy(Strategy):
                 uncertainty_discount = 1.0 - (5 - n_obs) * 0.1  # 0.5x for first trade, 1.0x after 5 trades
                 position_size *= max(uncertainty_discount, 0.5)
 
+            # Apply regime-specific factor
+            regime_factor = self.compression_regime_factor if trade_type == 'compression' else self.widening_regime_factor
+            position_size *= regime_factor
+
         else:
             # Original non-Bayesian Kelly
             if pair_id in self.spread_velocity_history and len(self.spread_velocity_history[pair_id]) > 5:
@@ -654,6 +711,10 @@ class SpreadDynamicsStrategy(Strategy):
                 return self.max_position
 
             position_size = self.kelly_fraction * (edge / np.sqrt(edge_variance))
+
+            # Apply regime-specific factor for non-Bayesian as well
+            regime_factor = self.compression_regime_factor if trade_type == 'compression' else self.widening_regime_factor
+            position_size *= regime_factor
 
         # Apply bounds
         position_size = min(position_size, self.max_position)
@@ -696,8 +757,8 @@ class SpreadDynamicsStrategy(Strategy):
         else:  # widening
             realized_return = spread_change   # Positive change = profit
 
-        # Update Bayesian posterior with this observation
-        self.update_edge_posterior(pair_id, realized_return)
+        # Update Bayesian posterior with this observation (regime-specific)
+        self.update_edge_posterior(pair_id, realized_return, position['trade_type'])
 
         # Close near leg (reverse the original trade)
         if position['trade_type'] == 'compression':
@@ -850,18 +911,30 @@ class SpreadDynamicsStrategy(Strategy):
             'sigma': self.prior_edge_std,
             'n_obs': 0
         })
+        # Reset signal-to-noise tracking
+        self.signal_history = []
+        self.trade_count_by_date = defaultdict(int)
+        self.trade_count_by_regime = defaultdict(int)
 
     def get_posterior_stats(self) -> pd.DataFrame:
         """
         Get summary statistics of Bayesian posteriors for all pairs.
 
         Returns:
-            DataFrame with posterior mean, std, and number of observations per pair
+            DataFrame with posterior mean, std, and number of observations per pair/regime
         """
         stats = []
-        for pair_id, posterior in self.edge_posterior.items():
+        for posterior_key, posterior in self.edge_posterior.items():
+            # Handle both old format (str) and new format (tuple)
+            if isinstance(posterior_key, tuple):
+                pair_id, trade_type = posterior_key
+            else:
+                pair_id = posterior_key
+                trade_type = 'unknown'
+
             stats.append({
                 'pair_id': pair_id,
+                'trade_type': trade_type,
                 'posterior_mean': posterior['mu'],
                 'posterior_std': posterior['sigma'],
                 'n_observations': posterior['n_obs'],
@@ -870,3 +943,80 @@ class SpreadDynamicsStrategy(Strategy):
             })
 
         return pd.DataFrame(stats) if stats else pd.DataFrame()
+
+    def get_signal_to_noise_metrics(self) -> Dict:
+        """
+        Calculate signal-to-noise metrics to identify overtrading.
+
+        Returns:
+            Dict with various signal quality and trading frequency metrics
+        """
+        if not self.signal_history:
+            return {}
+
+        df = pd.DataFrame(self.signal_history)
+
+        # 1. Trade Frequency Metrics
+        total_signals = len(df)
+        total_trades = df['traded'].sum()
+        signal_to_trade_ratio = total_trades / total_signals if total_signals > 0 else 0
+
+        unique_dates = df['date'].nunique()
+        trades_per_day = total_trades / unique_dates if unique_dates > 0 else 0
+
+        # 2. Signal Quality Metrics
+        # Calculate signal-to-noise ratio: mean absolute signal / std of signal
+        signal_strength = df['spread_velocity'].abs().mean()
+        signal_noise = df['spread_velocity'].std()
+        velocity_snr = signal_strength / signal_noise if signal_noise > 0 else 0
+
+        vol_zscore_strength = df['vol_zscore'].abs().mean()
+        vol_zscore_noise = df['vol_zscore'].std()
+        vol_snr = vol_zscore_strength / vol_zscore_noise if vol_zscore_noise > 0 else 0
+
+        # 3. Regime-specific metrics
+        regime_stats = {}
+        for trade_type in df['trade_type'].unique():
+            regime_df = df[df['trade_type'] == trade_type]
+            traded_df = regime_df[regime_df['traded']]
+
+            regime_stats[trade_type] = {
+                'total_signals': len(regime_df),
+                'total_trades': len(traded_df),
+                'signal_to_trade_ratio': len(traded_df) / len(regime_df) if len(regime_df) > 0 else 0,
+                'avg_velocity': regime_df['spread_velocity'].abs().mean(),
+                'avg_vol_zscore': regime_df['vol_zscore'].abs().mean()
+            }
+
+        # 4. Edge Confidence Metrics (from Bayesian posteriors)
+        edge_confidence_metrics = []
+        for posterior_key, posterior in self.edge_posterior.items():
+            if posterior['n_obs'] > 0:
+                # Edge confidence: like a Sharpe ratio for edge (mean / std)
+                edge_confidence = abs(posterior['mu']) / posterior['sigma'] if posterior['sigma'] > 0 else 0
+                edge_confidence_metrics.append(edge_confidence)
+
+        avg_edge_confidence = np.mean(edge_confidence_metrics) if edge_confidence_metrics else 0
+        max_edge_confidence = np.max(edge_confidence_metrics) if edge_confidence_metrics else 0
+
+        # 5. Trade Clustering (how concentrated are trades in time)
+        trades_by_date = df[df['traded']].groupby('date').size()
+        avg_trades_per_active_day = trades_by_date.mean() if len(trades_by_date) > 0 else 0
+        max_trades_per_day = trades_by_date.max() if len(trades_by_date) > 0 else 0
+        active_days = len(trades_by_date)
+
+        return {
+            'total_signals': total_signals,
+            'total_trades': total_trades,
+            'signal_to_trade_ratio': signal_to_trade_ratio,
+            'trades_per_day': trades_per_day,
+            'velocity_snr': velocity_snr,
+            'vol_zscore_snr': vol_snr,
+            'regime_stats': regime_stats,
+            'avg_edge_confidence': avg_edge_confidence,
+            'max_edge_confidence': max_edge_confidence,
+            'avg_trades_per_active_day': avg_trades_per_active_day,
+            'max_trades_per_day': max_trades_per_day,
+            'active_trading_days': active_days,
+            'unique_pairs_traded': df[df['traded']]['pair_id'].nunique()
+        }

@@ -111,6 +111,46 @@ if not posterior_stats.empty:
 else:
     print("\nNo posterior data available.")
 
+# Signal-to-Noise Analysis
+print("\n" + "="*60)
+print("SIGNAL-TO-NOISE METRICS")
+print("="*60)
+
+snr_metrics = strategy.get_signal_to_noise_metrics()
+if snr_metrics:
+    print(f"\nTrading Frequency:")
+    print(f"  Total signals evaluated:    {snr_metrics['total_signals']}")
+    print(f"  Total trades executed:      {snr_metrics['total_trades']}")
+    print(f"  Signal-to-trade ratio:      {snr_metrics['signal_to_trade_ratio']:.2%}")
+    print(f"  Trades per day:             {snr_metrics['trades_per_day']:.2f}")
+    print(f"  Active trading days:        {snr_metrics['active_trading_days']}")
+    print(f"  Avg trades/active day:      {snr_metrics['avg_trades_per_active_day']:.2f}")
+    print(f"  Max trades in one day:      {snr_metrics['max_trades_per_day']}")
+    print(f"  Unique pairs traded:        {snr_metrics['unique_pairs_traded']}")
+
+    print(f"\nSignal Quality (higher = better):")
+    print(f"  Velocity SNR:               {snr_metrics['velocity_snr']:.3f}")
+    print(f"  Volume Z-score SNR:         {snr_metrics['vol_zscore_snr']:.3f}")
+    print(f"  Avg edge confidence:        {snr_metrics['avg_edge_confidence']:.3f}")
+    print(f"  Max edge confidence:        {snr_metrics['max_edge_confidence']:.3f}")
+
+    print(f"\nRegime-Specific Stats:")
+    for regime, stats in snr_metrics['regime_stats'].items():
+        print(f"  {regime.upper()}:")
+        print(f"    Signals:        {stats['total_signals']}")
+        print(f"    Trades:         {stats['total_trades']}")
+        print(f"    Trade ratio:    {stats['signal_to_trade_ratio']:.2%}")
+        print(f"    Avg velocity:   {stats['avg_velocity']:.4f}")
+        print(f"    Avg vol z:      {stats['avg_vol_zscore']:.2f}")
+
+    print(f"\n  INTERPRETATION:")
+    print(f"  - If signal-to-trade ratio is high (>80%), you're trading most signals → may be overtrading")
+    print(f"  - If trades/day is high (>5), consider tightening filters")
+    print(f"  - Low SNR (<1.0) means noise dominates signal → need stronger filters")
+    print(f"  - Edge confidence <1.0 means high uncertainty → reduce position sizes")
+else:
+    print("\nNo signal data available yet.")
+
 print("\n" + "="*60 + "\n")
 
 # Save trades
