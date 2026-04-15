@@ -1,6 +1,11 @@
 #!/bin/bash
 # Script to update price history data
 
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+# Navigate to project root (one level up from scripts/)
+cd "$SCRIPT_DIR/.."
+
 echo "📊 Updating Polymarket price history..."
 echo ""
 

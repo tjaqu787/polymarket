@@ -1,6 +1,11 @@
 #!/bin/bash
 # Quick start script for the Polymarket Implied Rates Dashboard
 
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+# Navigate to project root (one level up from scripts/)
+cd "$SCRIPT_DIR/.."
+
 echo "🚀 Starting Polymarket Implied Rates Dashboard..."
 echo ""
 
